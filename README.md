@@ -82,6 +82,13 @@ YMM4側のクセもいくつか後始末します。
 | `.github/workflows/release.yml` | `v` で始まるタグを付けると、Windows版を自動で作って Releases に置く設定 |
 | `tests/` | ビフォー／アフターの例と確認用スクリプト |
 
+## 新しい版の出し方（開発者向け）
+1. `accent_app.py` の `VERSION` を上げる（例: `"0.3"`）
+2. `release-notes/v0.3.md` にリリースノートを書く
+3. main に送る
+
+GitHub Actions が Windows 版を作り、`v0.3` のタグと Release を自動で作ります。
+
 ## 記号の仕様
 [AquesTalk 音声記号列仕様書](https://www.a-quest.com/archive/manual/siyo_onseikigou.pdf)に従って検査しています。
 `/` 区切り、`,` 短いポーズ、`、` 長いポーズ、`+` 後ろが副次アクセント、`;` 次の句が高く始まる、`'` アクセント核、`_` 無声化。

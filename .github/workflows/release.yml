@@ -1,9 +1,15 @@
-# v から始まるタグ（例: v0.2）を付けると、Windows 用の .exe を作って Releases に置きます。
-# Actions タブから手動で動かした場合は、成果物（Artifacts）として zip を残すだけです。
+# Windows 用の .exe を作って Releases に置きます。動くきっかけは次の3つです。
+#   1. release-notes/ の中身を変えて main に送ったとき
+#      → accent_app.py の VERSION（例: 0.2）から v0.2 のタグと Release を自動で作ります
+#   2. v から始まるタグ（例: v0.3）を付けて送ったとき
+#   3. Actions タブから手動で動かしたとき（公開はせず、成果物として zip を残すだけ）
+# 版を上げる手順: accent_app.py の VERSION を上げる → release-notes/v<版>.md を書く → main に送る
 name: Windows 版をビルドして公開
 
 on:
   push:
+    branches: [main]
+    paths: ["release-notes/**"]
     tags: ["v*"]
   workflow_dispatch:
 
@@ -21,6 +27,17 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+
+      - name: 版の名前を決める
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            TAG="$GITHUB_REF_NAME"
+          else
+            TAG="v$(python -c "import re;print(re.search(r'VERSION = \"(.+?)\"', open('accent_app.py', encoding='utf-8').read()).group(1))")"
+          fi
+          echo "TAG=$TAG" >> "$GITHUB_ENV"
+          echo "版: $TAG"
 
       - name: 必要なものを入れる
         run: pip install pyinstaller pillow
@@ -48,7 +65,7 @@ jobs:
       - name: zip にまとめる
         shell: pwsh
         run: |
-          $name = "yukkuri-accent-${{ github.ref_name }}-windows"
+          $name = "yukkuri-accent-$env:TAG-windows"
           New-Item -ItemType Directory -Force "pkg/yukkuri-accent" | Out-Null
           Copy-Item dist/yukkuri-accent.exe pkg/yukkuri-accent/
           Copy-Item README.md, LICENSE pkg/yukkuri-accent/
@@ -63,9 +80,11 @@ jobs:
           path: ${{ env.ZIP_NAME }}
 
       - name: Releases に公開する
-        if: startsWith(github.ref, 'refs/tags/')
+        if: github.event_name == 'push'
         uses: softprops/action-gh-release@v2
         with:
-          name: ゆっくりアクセント辞書 ${{ github.ref_name }}
-          body_path: release-notes/${{ github.ref_name }}.md
+          tag_name: ${{ env.TAG }}
+          target_commitish: ${{ github.sha }}
+          name: ゆっくりアクセント辞書 ${{ env.TAG }}
+          body_path: release-notes/${{ env.TAG }}.md
           files: ${{ env.ZIP_NAME }}
