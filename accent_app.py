@@ -27,6 +27,8 @@ else:
 DICT_PATH = os.path.join(BASE_DIR, "accent_dict.json")
 NUM_PATH = os.path.join(BASE_DIR, "numbers.json")
 CONF_PATH = os.path.join(BASE_DIR, "settings.json")
+# 同梱ファイル（アイコンなど）の場所: .exe では展開先、スクリプトでは同じフォルダ
+RES_DIR = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
 
 COL_APPLIED = "#fff2b3"
 COL_ERROR = "#ffb3b3"
@@ -48,6 +50,13 @@ class App:
         root.title(f"{APP_NAME} v{VERSION}")
         root.geometry("1040x720")
         root.minsize(820, 560)
+        icon = os.path.join(RES_DIR, "assets", "icon.png")
+        if os.path.exists(icon):
+            try:
+                self._icon = tk.PhotoImage(file=icon)
+                root.iconphoto(True, self._icon)
+            except tk.TclError:
+                pass
 
         fam = pick_font(root)
         self.f_text = (fam, 14)

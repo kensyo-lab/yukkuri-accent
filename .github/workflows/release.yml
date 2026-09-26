@@ -1,0 +1,71 @@
+# v から始まるタグ（例: v0.2）を付けると、Windows 用の .exe を作って Releases に置きます。
+# Actions タブから手動で動かした場合は、成果物（Artifacts）として zip を残すだけです。
+name: Windows 版をビルドして公開
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    env:
+      PYTHONUTF8: "1"   # 日本語の出力で文字化け・エラーにならないように
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 必要なものを入れる
+        run: pip install pyinstaller pillow
+
+      - name: テスト（数字の展開と学習）
+        shell: bash
+        run: |
+          python tests/test_samples.py
+          python tests/check_numbers.py > /dev/null
+
+      - name: アイコンを用意する
+        shell: bash
+        run: |
+          if [ -f assets/icon.png ]; then
+            python tools/make_icon.py assets/icon.png build_icon.ico
+            echo "ICON_ARGS=--icon build_icon.ico --add-data assets/icon.png;assets" >> "$GITHUB_ENV"
+          else
+            echo "assets/icon.png が無いので、アイコンなしで作ります"
+          fi
+
+      - name: .exe を作る
+        shell: bash
+        run: pyinstaller --noconfirm --onefile --windowed --name yukkuri-accent $ICON_ARGS accent_app.py
+
+      - name: zip にまとめる
+        shell: pwsh
+        run: |
+          $name = "yukkuri-accent-${{ github.ref_name }}-windows"
+          New-Item -ItemType Directory -Force "pkg/yukkuri-accent" | Out-Null
+          Copy-Item dist/yukkuri-accent.exe pkg/yukkuri-accent/
+          Copy-Item README.md, LICENSE pkg/yukkuri-accent/
+          Copy-Item -Recurse dictionaries pkg/yukkuri-accent/
+          Compress-Archive -Path pkg/yukkuri-accent -DestinationPath "$name.zip"
+          "ZIP_NAME=$name.zip" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: 成果物として残す
+        uses: actions/upload-artifact@v4
+        with:
+          name: yukkuri-accent-windows
+          path: ${{ env.ZIP_NAME }}
+
+      - name: Releases に公開する
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ゆっくりアクセント辞書 ${{ github.ref_name }}
+          body_path: release-notes/${{ github.ref_name }}.md
+          files: ${{ env.ZIP_NAME }}
