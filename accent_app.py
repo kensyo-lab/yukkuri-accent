@@ -18,7 +18,7 @@ from tkinter import ttk, messagebox, filedialog
 import accent_core as core
 
 APP_NAME = "ゆっくりアクセント辞書"
-VERSION = "0.2"
+VERSION = "0.2.1"
 
 if getattr(sys, "frozen", False):
     BASE_DIR = os.path.dirname(sys.executable)
@@ -35,10 +35,15 @@ COL_ERROR = "#ffb3b3"
 COL_WARN = "#ffd9a6"
 
 
-def pick_font(root) -> str:
+TEXT_FONTS = ("BIZ UDゴシック", "BIZ UDGothic", "Meiryo UI", "メイリオ", "Meiryo",
+              "Yu Gothic UI", "Hiragino Sans", "Noto Sans CJK JP", "Noto Sans JP")
+# 1行の入力欄では行の下に余白を足せないので、アンダーバーが文字枠に収まるフォントを優先する
+ENTRY_FONTS = ("Meiryo UI", "メイリオ", "Meiryo", "Yu Gothic UI") + TEXT_FONTS
+
+
+def pick_font(root, candidates=TEXT_FONTS) -> str:
     fams = set(tkfont.families(root))
-    for f in ("BIZ UDゴシック", "BIZ UDGothic", "Meiryo UI", "メイリオ", "Meiryo",
-              "Yu Gothic UI", "Hiragino Sans", "Noto Sans CJK JP", "Noto Sans JP"):
+    for f in candidates:
         if f in fams:
             return f
     return "TkDefaultFont"
@@ -60,6 +65,7 @@ class App:
 
         fam = pick_font(root)
         self.f_text = (fam, 14)
+        self.f_entry = (pick_font(root, ENTRY_FONTS), 13)
         self.f_ui = (fam, 10)
         style = ttk.Style(root)
         style.configure(".", font=self.f_ui)
@@ -149,8 +155,9 @@ class App:
 
     def _text(self, parent, height):
         frm = ttk.Frame(parent)
+        # spacing3: 行の下に余白を足す（BIZ UDゴシックなどでアンダーバー「_」が行の下端で切れないように）
         t = tk.Text(frm, height=height, wrap="char", font=self.f_text, undo=True,
-                    padx=8, pady=6, relief="solid", borderwidth=1)
+                    padx=8, pady=6, relief="solid", borderwidth=1, spacing1=2, spacing3=6)
         sb = ttk.Scrollbar(frm, command=t.yview)
         t.configure(yscrollcommand=sb.set)
         t.pack(side="left", fill="both", expand=True)
@@ -541,8 +548,8 @@ class EntryDialog:
         ttk.Label(w, text="メモ").grid(row=3, column=0, sticky="w", **pad)
         self.v_src, self.v_dst = tk.StringVar(value=src), tk.StringVar(value=dst)
         self.v_head, self.v_note = tk.BooleanVar(value=head), tk.StringVar(value=note)
-        e1 = ttk.Entry(w, textvariable=self.v_src, font=app.f_text, width=36)
-        e2 = ttk.Entry(w, textvariable=self.v_dst, font=app.f_text, width=36)
+        e1 = ttk.Entry(w, textvariable=self.v_src, font=app.f_entry, width=36)
+        e2 = ttk.Entry(w, textvariable=self.v_dst, font=app.f_entry, width=36)
         e1.grid(row=0, column=1, sticky="ew", **pad)
         e2.grid(row=1, column=1, sticky="ew", **pad)
         ttk.Checkbutton(w, text="句の頭でだけ置き換える（短い語の誤爆よけ）",
