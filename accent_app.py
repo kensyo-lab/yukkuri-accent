@@ -18,7 +18,7 @@ from tkinter import ttk, messagebox, filedialog
 import accent_core as core
 
 APP_NAME = "ゆっくりアクセント辞書"
-VERSION = "0.2.2"
+VERSION = "0.2.3"
 
 if getattr(sys, "frozen", False):
     BASE_DIR = os.path.dirname(sys.executable)
@@ -36,7 +36,6 @@ COL_WARN = "#ffd9a6"
 COL_MK_ACCENT = "#d0342c"      # ' アクセント
 COL_MK_SEP = "#8a8f98"         # / , + ; 区切り
 COL_MK_DEVOICE = "#1f5fbf"     # _ 無声化
-COL_MK_DEVOICE_BG = "#dde9fb"
 
 
 TEXT_FONTS = ("BIZ UDゴシック", "BIZ UDGothic", "Meiryo UI", "メイリオ", "Meiryo",
@@ -81,6 +80,9 @@ class App:
         self.numbers = core.load_numbers(NUM_PATH)
         self.dic = core.Dictionary.load(DICT_PATH)
         self.conf = self._load_conf()
+
+        self.color_marks = tk.BooleanVar(value=self.conf.get("color_marks", True))
+        self._texts = []
 
         nb = ttk.Notebook(root)
         nb.pack(fill="both", expand=True, padx=8, pady=(8, 0))
@@ -132,6 +134,7 @@ class App:
 
     def _save_conf(self):
         self.conf["auto_copy"] = bool(self.auto_copy.get())
+        self.conf["color_marks"] = bool(self.color_marks.get())
         try:
             with open(CONF_PATH, "w", encoding="utf-8") as f:
                 json.dump(self.conf, f, ensure_ascii=False, indent=1)
@@ -166,15 +169,19 @@ class App:
         t.pack(side="left", fill="both", expand=True)
         sb.pack(side="right", fill="y")
         # 記号の色分け。BIZ UDゴシックの「_」は線が細すぎて消えかけて見えるので、
-        # 線の太いフォントの太字で描き、無声化する仮名にも淡い色を敷く
+        # 線の太いフォントの太字で描く
         fam = self.f_entry[0]
         size = self.f_text[1]
         t.tag_configure("mk_acc", foreground=COL_MK_ACCENT, font=(self.f_text[0], size, "bold"))
         t.tag_configure("mk_sep", foreground=COL_MK_SEP)
         t.tag_configure("mk_dv", foreground=COL_MK_DEVOICE, font=(fam, size, "bold"))
-        t.tag_configure("mk_dvk", foreground=COL_MK_DEVOICE, background=COL_MK_DEVOICE_BG)
         t.bind("<<Modified>>", lambda e, w=t: self._on_modified(w))
+        self._texts.append(t)
         return frm, t
+
+    def _repaint_all(self):
+        for t in self._texts:
+            self._paint_marks(t)
 
     def _on_modified(self, t):
         if t.edit_modified():
@@ -182,8 +189,10 @@ class App:
             t.after_idle(lambda: self._paint_marks(t))
 
     def _paint_marks(self, t):
-        for tag in ("mk_acc", "mk_sep", "mk_dv", "mk_dvk"):
+        for tag in ("mk_acc", "mk_sep", "mk_dv"):
             t.tag_remove(tag, "1.0", "end")
+        if not self.color_marks.get():
+            return
         s = t.get("1.0", "end-1c")
         for i, c in enumerate(s):
             tag = None
@@ -192,10 +201,7 @@ class App:
             elif c in "/,+;／，＋；":
                 tag = "mk_sep"
             elif c in "_＿":
-                t.tag_add("mk_dv", f"1.0+{i}c")
-                if i + 1 < len(s) and s[i + 1] not in "\n":
-                    t.tag_add("mk_dvk", f"1.0+{i + 1}c")
-                continue
+                tag = "mk_dv"
             if tag:
                 t.tag_add(tag, f"1.0+{i}c")
 
@@ -217,6 +223,8 @@ class App:
         ttk.Button(mid, text="変換 ▼（Ctrl+Enter）", style="Big.TButton", command=self.do_convert).pack(side="left")
         self.auto_copy = tk.BooleanVar(value=self.conf.get("auto_copy", True))
         ttk.Checkbutton(mid, text="変換したら自動でコピー", variable=self.auto_copy).pack(side="left", padx=12)
+        ttk.Checkbutton(mid, text="記号を色分け", variable=self.color_marks,
+                        command=self._repaint_all).pack(side="left")
 
         lab = ttk.Frame(tab)
         lab.pack(fill="x", pady=(10, 0))

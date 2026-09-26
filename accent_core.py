@@ -713,7 +713,7 @@ def validate(s: str) -> list[Issue]:
             elif prev in (ACCENT, DEVOICE):
                 issues.append(Issue("error", i, i + 1, f"「{prev}」の直後に ' があります"))
             if accent_seen >= 0:
-                issues.append(Issue("error", i, i + 1, "1つのアクセント句に ' が2つ以上あります（/ で区切ってください）"))
+                issues.append(Issue("error", i, i + 1, "1つのアクセント句に ' が2つ以上あります（/ や , などで文節区切りを行ってください）"))
             accent_seen = i
             if nxt in SMALL_KANA:
                 issues.append(Issue("warn", i, i + 2, "' が拗音（ゃゅょ など）の途中にあります"))
