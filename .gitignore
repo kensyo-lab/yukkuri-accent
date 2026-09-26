@@ -1,0 +1,7 @@
+# 各自の環境で作られるファイル
+accent_dict.json
+numbers.json
+numbers_old_backup.json
+settings.json
+*.tmp
+__pycache__/
