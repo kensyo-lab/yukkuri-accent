@@ -6,7 +6,7 @@ YMM4が出力するAquesTalk（ゆっくりボイス）の読み記号列を、*
 ## ダウンロードと起動
 
 ### かんたんな方法（Windows・Pythonは不要）
-1. [Releases](https://github.com/kensyo-lab/yukkuri-accent/releases) から最新の `yukkuri-accent-vX.X-windows.zip` をダウンロードします
+1. [最新のリリース](https://github.com/kensyo-lab/yukkuri-accent/releases/latest)を開き、下の **Assets** にある `yukkuri-accent-vX.X-windows.zip` をダウンロードします（「Source code」の方には .exe が入っていません。また、このページ上部の緑の「Code」ボタンから落とせるのもソースコードです）
 2. 好きなフォルダに展開します（「Program Files」の中など、書き込みが制限される場所は避けてください）
 3. `yukkuri-accent.exe` をダブルクリックして起動します
 
