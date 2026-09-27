@@ -1,5 +1,5 @@
 """
-ゆっくりアクセント辞書 v0.1 — tkinter GUI
+ゆっくりアクセント辞書 — tkinter GUI
 
 使い方:
     python accent_app.py
@@ -11,6 +11,8 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
+import threading
 import tkinter as tk
 import tkinter.font as tkfont
 from tkinter import ttk, messagebox, filedialog
@@ -18,7 +20,7 @@ from tkinter import ttk, messagebox, filedialog
 import accent_core as core
 
 APP_NAME = "ゆっくりアクセント辞書"
-VERSION = "0.2.3"
+VERSION = "0.3"
 
 if getattr(sys, "frozen", False):
     BASE_DIR = os.path.dirname(sys.executable)
@@ -36,6 +38,10 @@ COL_WARN = "#ffd9a6"
 COL_MK_ACCENT = "#d0342c"      # ' アクセント
 COL_MK_SEP = "#8a8f98"         # / , + ; 区切り
 COL_MK_DEVOICE = "#1f5fbf"     # _ 無声化
+
+IS_WINDOWS = sys.platform.startswith("win")
+DEFAULT_PRESETS = ("まりさ", "れいむ")
+PLAYER_TIMEOUT = 60   # AquesTalkPlayer の書き出しを待つ上限（秒）
 
 
 TEXT_FONTS = ("BIZ UDゴシック", "BIZ UDGothic", "Meiryo UI", "メイリオ", "Meiryo",
@@ -82,6 +88,10 @@ class App:
         self.conf = self._load_conf()
 
         self.color_marks = tk.BooleanVar(value=self.conf.get("color_marks", True))
+        self.player_path = tk.StringVar(value=self.conf.get("aquestalk_player", ""))
+        self._preview_gen = 0      # 試聴の世代。停止や新しい試聴で古い結果を捨てる
+        self._proc = None          # 書き出し中の AquesTalkPlayer
+        self._wav = None           # いま再生している一時WAV
         self._texts = []
 
         nb = ttk.Notebook(root)
@@ -90,6 +100,7 @@ class App:
         self._build_convert(nb)
         self._build_learn(nb)
         self._build_dict(nb)
+        self._build_settings(nb)
 
         self.status = tk.StringVar()
         ttk.Label(root, textvariable=self.status, anchor="w", padding=(10, 4)).pack(fill="x")
@@ -135,6 +146,9 @@ class App:
     def _save_conf(self):
         self.conf["auto_copy"] = bool(self.auto_copy.get())
         self.conf["color_marks"] = bool(self.color_marks.get())
+        self.conf["aquestalk_player"] = self.player_path.get().strip()
+        self.conf["voice_preset"] = self.voice.get().strip()
+        self.conf["voice_presets"] = list(self.voice_box["values"])
         try:
             with open(CONF_PATH, "w", encoding="utf-8") as f:
                 json.dump(self.conf, f, ensure_ascii=False, indent=1)
@@ -142,6 +156,8 @@ class App:
             pass
 
     def on_close(self):
+        self.stop_preview()
+        self._remove_wav()
         self.save_dict()
         self._save_conf()
         self.root.destroy()
@@ -245,6 +261,28 @@ class App:
         ttk.Button(bot, text="再チェック", command=self.recheck).pack(side="left", padx=6)
         ttk.Button(bot, text="この手直しを学習タブへ送る →", command=self.send_to_learn).pack(side="right")
 
+        pv = ttk.Frame(tab)
+        pv.pack(fill="x", pady=(8, 0))
+        self.btn_play = ttk.Button(pv, text="▶ 試聴", command=self.preview)
+        self.btn_play.pack(side="left")
+        self.btn_stop = ttk.Button(pv, text="■ 停止", command=self.stop_preview)
+        self.btn_stop.pack(side="left", padx=(4, 12))
+        ttk.Label(pv, text="声（プリセット）:").pack(side="left")
+        presets = list(self.conf.get("voice_presets") or DEFAULT_PRESETS)
+        last = self.conf.get("voice_preset", presets[0] if presets else "")
+        if last and last not in presets:
+            presets.insert(0, last)
+        self.voice = tk.StringVar(value=last)
+        self.voice_box = ttk.Combobox(pv, textvariable=self.voice, values=presets, width=16, font=self.f_ui)
+        self.voice_box.pack(side="left", padx=4)
+        if IS_WINDOWS:
+            hint = "選択範囲があればその部分、なければカーソルのある行を読み上げます"
+        else:
+            hint = "試聴は Windows 専用です（AquesTalkPlayer が Windows 用のため）"
+            for w in (self.btn_play, self.btn_stop, self.voice_box):
+                w.state(["disabled"])
+        ttk.Label(pv, text=hint, foreground="#666").pack(side="left", padx=8)
+
         ttk.Label(tab, text="チェック結果（クリックすると該当箇所を選択）").pack(anchor="w", pady=(10, 2))
         self.issue_list = tk.Listbox(tab, height=4, font=self.f_ui, activestyle="none")
         self.issue_list.pack(fill="x")
@@ -332,6 +370,133 @@ class App:
         self.l_after.insert("1.0", self.out_text.get("1.0", "end-1c"))
         self.nb.select(1)
         self.do_learn()
+
+    # ── 試聴（AquesTalkPlayer） ─────────────────────
+    def _preview_text(self) -> str:
+        """選択範囲があればその部分、なければカーソルのある行。複数行は「。」でつなぐ。"""
+        t = self.out_text
+        if t.tag_ranges("sel"):
+            s = t.get("sel.first", "sel.last")
+        else:
+            s = t.get("insert linestart", "insert lineend")
+        lines = [core.normalize(x).strip() for x in s.splitlines()]
+        return "。".join(x for x in lines if x)
+
+    def _remember_voice(self, name):
+        vals = [v for v in self.voice_box["values"] if v != name]
+        self.voice_box["values"] = [name] + vals if name else vals
+
+    def preview(self):
+        if not IS_WINDOWS:
+            return
+        exe = self.player_path.get().strip()
+        if not exe:
+            messagebox.showinfo(APP_NAME, "試聴には AquesTalkPlayer が必要です。\n\n"
+                                "「設定」タブで AquesTalkPlayer.exe の場所を指定してください。\n"
+                                "（AquesTalkPlayer は株式会社アクエストの公式サイトから入手できます）")
+            self.nb.select(self.settings_tab)
+            return
+        if not os.path.isfile(exe):
+            messagebox.showerror(APP_NAME, f"AquesTalkPlayer が見つかりません。\n{exe}\n\n"
+                                 "「設定」タブで AquesTalkPlayer.exe の場所を指定し直してください。")
+            self.nb.select(self.settings_tab)
+            return
+        text = self._preview_text()
+        if not text:
+            messagebox.showinfo(APP_NAME, "読み上げる所がありません。\n"
+                                "変換結果の欄で、読み上げたい行にカーソルを置くか、範囲を選択してください。")
+            return
+        voice = self.voice.get().strip()
+
+        self.stop_preview()
+        self._preview_gen += 1
+        gen = self._preview_gen
+        fd, wav = tempfile.mkstemp(prefix="yukkuri-accent-", suffix=".wav")
+        os.close(fd)
+        args = [exe, "/T", "#>" + text, "/W", wav]
+        if voice:
+            args += ["/P", voice]
+        self._refresh_status("試聴: 音声を作っています…")
+        threading.Thread(target=self._synth, args=(gen, args, wav, voice), daemon=True).start()
+
+    def _synth(self, gen, args, wav, voice):
+        """別スレッドで AquesTalkPlayer を動かし、終わるまで待つ。結果は画面側のスレッドへ渡す。"""
+        err = None
+        proc = None
+        try:
+            # --windowed の .exe では標準入出力が無いので、明示的に捨て先を渡す
+            proc = subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                    stderr=subprocess.DEVNULL)
+            self._proc = proc
+            try:
+                code = proc.wait(timeout=PLAYER_TIMEOUT)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                code = None
+                err = (f"AquesTalkPlayer が {PLAYER_TIMEOUT} 秒たっても終わりませんでした。\n"
+                       "AquesTalkPlayer の画面にメッセージが出ていないか確認してください。")
+            if gen != self._preview_gen:
+                code = None   # 途中で停止された
+            elif err is None and code != 0:
+                err = (f"AquesTalkPlayer がエラーで終了しました（終了コード {code}）。\n\n"
+                       "次を確認してください。\n"
+                       f"・声のプリセット名「{voice}」が AquesTalkPlayer にあるか\n"
+                       "・読み上げる記号列にエラー（赤い所）が残っていないか")
+            elif err is None and (not os.path.exists(wav) or os.path.getsize(wav) == 0):
+                err = "AquesTalkPlayer は終了しましたが、音声ファイルが作られませんでした。"
+        except OSError as ex:
+            err = f"AquesTalkPlayer を起動できませんでした。\n{args[0]}\n{ex}"
+        finally:
+            if self._proc is proc:
+                self._proc = None
+        self.root.after(0, lambda: self._synth_done(gen, wav, err, voice))
+
+    def _synth_done(self, gen, wav, err, voice):
+        if gen != self._preview_gen:
+            self._remove_file(wav)
+            return
+        if err:
+            self._remove_file(wav)
+            self._refresh_status("試聴できませんでした")
+            messagebox.showerror(APP_NAME, err)
+            return
+        self._remember_voice(voice)   # 使えたプリセットだけ候補に残す
+        self._save_conf()
+        import winsound
+        self._wav = wav
+        try:
+            winsound.PlaySound(wav, winsound.SND_FILENAME | winsound.SND_ASYNC)
+            self._refresh_status("試聴: 再生中")
+        except RuntimeError as ex:
+            messagebox.showerror(APP_NAME, f"音声を再生できませんでした。\n{ex}")
+
+    def stop_preview(self):
+        self._preview_gen += 1
+        proc = self._proc
+        if proc is not None:
+            try:
+                proc.kill()
+            except OSError:
+                pass
+        if IS_WINDOWS:
+            import winsound
+            try:
+                winsound.PlaySound(None, 0)
+            except RuntimeError:
+                pass
+        self._remove_wav()
+
+    def _remove_wav(self):
+        if self._wav:
+            self._remove_file(self._wav)
+            self._wav = None
+
+    @staticmethod
+    def _remove_file(p):
+        try:
+            os.remove(p)
+        except OSError:
+            pass
 
     # ── タブ2: 学習 ─────────────────────────────────
     def _build_learn(self, nb):
@@ -572,6 +737,39 @@ class App:
             self._refresh_status("数字の読み表を再読み込みしました")
         except Exception as ex:
             messagebox.showerror(APP_NAME, f"numbers.json を読めませんでした。\n{ex}")
+
+
+    # ── タブ4: 設定 ─────────────────────────────────
+    def _build_settings(self, nb):
+        tab = ttk.Frame(nb, padding=10)
+        nb.add(tab, text="　設定　")
+        self.settings_tab = tab
+        ttk.Label(tab, text="試聴（AquesTalkPlayer）", font=(self.f_ui[0], 11, "bold")).pack(anchor="w")
+        row = ttk.Frame(tab)
+        row.pack(fill="x", pady=6)
+        ttk.Label(row, text="AquesTalkPlayer.exe の場所:").pack(side="left")
+        e = ttk.Entry(row, textvariable=self.player_path, font=self.f_ui)
+        e.pack(side="left", fill="x", expand=True, padx=6)
+        e.bind("<FocusOut>", lambda ev: self._save_conf())
+        ttk.Button(row, text="参照…", command=self.browse_player).pack(side="left")
+        note = ("AquesTalkPlayer は株式会社アクエストのソフトです。このツールには同梱していないので、"
+                "公式サイトから各自で入手してください（個人の非営利使用は無料、営利目的には使用ライセンスの購入が必要です）。\n"
+                "声は、変換タブの「声（プリセット）」に AquesTalkPlayer のプリセット名を入れて選びます。"
+                "AquesTalkPlayer で自分のキャラクター用のプリセットを作れば、その名前も使えます。")
+        if not IS_WINDOWS:
+            note += "\n\n※ AquesTalkPlayer は Windows 用のソフトなので、この環境では試聴できません。"
+        ttk.Label(tab, text=note, foreground="#444", wraplength=960, justify="left").pack(anchor="w", pady=(4, 0))
+
+    def browse_player(self):
+        cur = self.player_path.get().strip()
+        p = filedialog.askopenfilename(
+            title="AquesTalkPlayer.exe を選ぶ",
+            initialdir=os.path.dirname(cur) if cur and os.path.isdir(os.path.dirname(cur)) else None,
+            filetypes=[("AquesTalkPlayer", "AquesTalkPlayer.exe"), ("実行ファイル", "*.exe"), ("すべて", "*.*")])
+        if p:
+            self.player_path.set(os.path.normpath(p))
+            self._save_conf()
+            self._refresh_status("AquesTalkPlayer の場所を保存しました")
 
 
 class EntryDialog:
