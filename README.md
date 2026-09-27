@@ -63,6 +63,7 @@ python accent_app.py
 - 最後に使った声と AquesTalkPlayer の場所は `settings.json` に保存され、次回も引き継がれます
 - AquesTalkPlayer がエラーになったとき（プリセット名が無い、記号列にエラーが残っている など）は、その旨を表示します
 - AquesTalkPlayer は Windows 用のソフトなので、Windows 以外では試聴ボタンは押せません
+- **アクセント（`'`）が効かず平坦に聞こえるとき**は、AquesTalkPlayer でそのプリセットを開き、「棒読み」のチェックを外して［Set］で保存してください。棒読みがオンだと `'` が無視されます。YMM4 の「ゆっくり魔理沙」に近づけるなら、声種「AquesTalk1 f2」・話速 110 が目安です
 
 > **AquesTalkPlayer について**
 > - AquesTalkPlayer は株式会社アクエストのソフトウェアです。このツールには**同梱していません**（再配布は禁止されています）。必ず各自で[公式サイト](https://www.a-quest.com/products/aquestalkplayer.html)から入手してください
