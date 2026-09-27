@@ -762,7 +762,8 @@ class App:
         note = ("AquesTalkPlayer は株式会社アクエストのソフトです。このツールには同梱していないので、"
                 "公式サイトから各自で入手してください（個人の非営利使用は無料、営利目的には使用ライセンスの購入が必要です）。\n"
                 "声は、変換タブの「声（プリセット）」に AquesTalkPlayer のプリセット名を入れて選びます。"
-                "AquesTalkPlayer で自分のキャラクター用のプリセットを作れば、その名前も使えます。")
+                "AquesTalkPlayer で自分のキャラクター用のプリセットを作れば、その名前も使えます。\n"
+                "アクセントが効かず平坦に聞こえるときは、AquesTalkPlayer でプリセットの「棒読み」を外して［Set］で保存してください。")
         if not IS_WINDOWS:
             note += "\n\n※ AquesTalkPlayer は Windows 用のソフトなので、この環境では試聴できません。"
         ttk.Label(tab, text=note, foreground="#444", wraplength=960, justify="left").pack(anchor="w", pady=(4, 0))
