@@ -276,7 +276,7 @@ class App:
         self.voice_box = ttk.Combobox(pv, textvariable=self.voice, values=presets, width=16, font=self.f_ui)
         self.voice_box.pack(side="left", padx=4)
         if IS_WINDOWS:
-            hint = "選択範囲があればその部分、なければカーソルのある行を読み上げます"
+            hint = "選択範囲があればその部分、なければ変換結果の全体を読み上げます"
         else:
             hint = "試聴は Windows 専用です（AquesTalkPlayer が Windows 用のため）"
             for w in (self.btn_play, self.btn_stop, self.voice_box):
@@ -373,14 +373,20 @@ class App:
 
     # ── 試聴（AquesTalkPlayer） ─────────────────────
     def _preview_text(self) -> str:
-        """選択範囲があればその部分、なければカーソルのある行。複数行は「。」でつなぐ。"""
+        """選択範囲があればその部分、なければ全体。行の区切りは、句読点で終わっていなければ「。」を補う。"""
         t = self.out_text
         if t.tag_ranges("sel"):
             s = t.get("sel.first", "sel.last")
         else:
-            s = t.get("insert linestart", "insert lineend")
-        lines = [core.normalize(x).strip() for x in s.splitlines()]
-        return "。".join(x for x in lines if x)
+            s = t.get("1.0", "end-1c")
+        out = ""
+        for x in (core.normalize(x).strip() for x in s.splitlines()):
+            if not x:
+                continue
+            if out and out[-1] not in "。、？！,":
+                out += "。"
+            out += x
+        return out
 
     def _remember_voice(self, name):
         vals = [v for v in self.voice_box["values"] if v != name]
@@ -404,7 +410,7 @@ class App:
         text = self._preview_text()
         if not text:
             messagebox.showinfo(APP_NAME, "読み上げる所がありません。\n"
-                                "変換結果の欄で、読み上げたい行にカーソルを置くか、範囲を選択してください。")
+                                "変換結果の欄に読みを入れてから押してください。")
             return
         voice = self.voice.get().strip()
 
@@ -416,6 +422,7 @@ class App:
         args = [exe, "/T", "#>" + text, "/W", wav]
         if voice:
             args += ["/P", voice]
+        self._preview_said = text if len(text) <= 60 else text[:60] + "…"
         self._refresh_status("試聴: 音声を作っています…")
         threading.Thread(target=self._synth, args=(gen, args, wav, voice), daemon=True).start()
 
@@ -466,7 +473,7 @@ class App:
         self._wav = wav
         try:
             winsound.PlaySound(wav, winsound.SND_FILENAME | winsound.SND_ASYNC)
-            self._refresh_status("試聴: 再生中")
+            self._refresh_status(f"試聴: 再生中 — {self._preview_said}")
         except RuntimeError as ex:
             messagebox.showerror(APP_NAME, f"音声を再生できませんでした。\n{ex}")
 
