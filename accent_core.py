@@ -737,6 +737,108 @@ def validate(s: str) -> list[Issue]:
 
 
 # ─────────────────────────────────────────────
+# 4.5) 文節（アクセント句）の分解と、アクセントの付け替え
+# ─────────────────────────────────────────────
+# アクセント核を置けない拍（特殊拍）。拗音（ゃゅょ など）は直前の文字とまとめて1拍にする
+NO_ACCENT = set("ーっッんン")
+
+
+@dataclass
+class Mora:
+    start: int           # 元の文字列での位置（_ や小さい仮名を含む）
+    end: int
+    text: str
+    can_accent: bool
+    devoiced: bool = False
+
+
+@dataclass
+class Phrase:
+    start: int
+    end: int
+    units: list[Mora] = field(default_factory=list)
+    accents: list[int] = field(default_factory=list)   # ' の直前の拍の番号（ふつうは0か1個）
+    marks: list[int] = field(default_factory=list)     # ' の位置
+
+
+@dataclass
+class Sep:
+    start: int
+    end: int
+    text: str            # 区切り記号（/ 、 など）。改行は "\n" 1文字で1つ
+
+
+def split_phrases(s: str) -> list[Phrase | Sep]:
+    """記号列を、文節（Phrase）と区切り（Sep）の並びに分ける。<タグ> は1つの拍（アクセント不可）として扱う。"""
+    tags = {m.start(): m.end() for m in TAG_RE.finditer(s)}
+    out: list[Phrase | Sep] = []
+    cur: Phrase | None = None
+    i, n = 0, len(s)
+    while i < n:
+        c = s[i]
+        if i not in tags and c in BOUNDARY:
+            if cur is not None:
+                cur.end = i
+                out.append(cur)
+                cur = None
+            j = i + 1
+            if c != "\n":
+                while j < n and j not in tags and s[j] in BOUNDARY and s[j] != "\n":
+                    j += 1
+            out.append(Sep(i, j, s[i:j]))
+            i = j
+            continue
+        if cur is None:
+            cur = Phrase(i, i)
+        if i in tags:
+            cur.units.append(Mora(i, tags[i], s[i:tags[i]], False))
+            i = tags[i]
+        elif c == ACCENT:
+            cur.marks.append(i)
+            if cur.units:
+                cur.accents.append(len(cur.units) - 1)
+            i += 1
+        elif c == DEVOICE or is_hira(c) or is_kata(c):
+            st = i
+            devoiced = c == DEVOICE
+            if devoiced:
+                i += 1
+            base = s[i] if i < n and (is_hira(s[i]) or is_kata(s[i])) else ""
+            if base:
+                i += 1
+                while i < n and s[i] in SMALL_KANA:
+                    i += 1
+            ok = bool(base) and base not in NO_ACCENT and base not in SMALL_KANA
+            cur.units.append(Mora(st, i, s[st:i], ok, devoiced))
+        else:
+            cur.units.append(Mora(i, i + 1, c, False))
+            i += 1
+    if cur is not None:
+        cur.end = n
+        out.append(cur)
+    return out
+
+
+def accent_edits(ph: Phrase, k: int) -> tuple[list[int], int | None]:
+    """文節 ph のアクセントを k 拍目の後ろに付け替えるための編集。
+    k がすでに唯一のアクセントなら外す（平板にする）。
+    戻り値: (消す ' の位置のリスト, ' を入れる位置 or None)。位置は元の文字列のもの。"""
+    if ph.accents == [k] and len(ph.marks) == 1:
+        return list(ph.marks), None
+    return list(ph.marks), ph.units[k].end
+
+
+def apply_accent(s: str, ph: Phrase, k: int) -> str:
+    dels, ins = accent_edits(ph, k)
+    chars = list(s)
+    if ins is not None:
+        chars.insert(ins, ACCENT)
+    for d in sorted(dels, reverse=True):
+        chars.pop(d if ins is None or d < ins else d + 1)
+    return "".join(chars)
+
+
+# ─────────────────────────────────────────────
 # まとめ: 変換
 # ─────────────────────────────────────────────
 @dataclass

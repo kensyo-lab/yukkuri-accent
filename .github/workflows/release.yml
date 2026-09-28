@@ -46,6 +46,7 @@ jobs:
         shell: bash
         run: |
           python tests/test_samples.py
+          python tests/test_accent_edit.py
           python tests/check_numbers.py > /dev/null
 
       - name: アイコンを用意する

@@ -20,7 +20,7 @@ from tkinter import ttk, messagebox, filedialog
 import accent_core as core
 
 APP_NAME = "ゆっくりアクセント辞書"
-VERSION = "0.3"
+VERSION = "0.4"
 
 if getattr(sys, "frozen", False):
     BASE_DIR = os.path.dirname(sys.executable)
@@ -114,6 +114,8 @@ class App:
         for k in ("<Control-Shift-C>", "<Control-Shift-c>"):
             root.bind_all(k, lambda e: (self.copy_output(), "break")[1])
         root.protocol("WM_DELETE_WINDOW", self.on_close)
+        if self.conf.get("accent_panel"):
+            root.after_idle(lambda: self.toggle_accent_panel(True))
 
     # ── 数字の読み表 ────────────────────────────────
     def _ensure_numbers_file(self):
@@ -146,6 +148,7 @@ class App:
     def _save_conf(self):
         self.conf["auto_copy"] = bool(self.auto_copy.get())
         self.conf["color_marks"] = bool(self.color_marks.get())
+        self.conf["accent_panel"] = bool(self._acc_shown)
         self.conf["aquestalk_player"] = self.player_path.get().strip()
         self.conf["voice_preset"] = self.voice.get().strip()
         self.conf["voice_presets"] = list(self.voice_box["values"])
@@ -203,6 +206,8 @@ class App:
         if t.edit_modified():
             t.edit_modified(False)
             t.after_idle(lambda: self._paint_marks(t))
+            if t is getattr(self, "out_text", None):
+                t.after_idle(self._draw_accent_panel)
 
     def _paint_marks(self, t):
         for tag in ("mk_acc", "mk_sep", "mk_dv"):
@@ -241,6 +246,9 @@ class App:
         ttk.Checkbutton(mid, text="変換したら自動でコピー", variable=self.auto_copy).pack(side="left", padx=12)
         ttk.Checkbutton(mid, text="記号を色分け", variable=self.color_marks,
                         command=self._repaint_all).pack(side="left")
+        self.btn_acc = ttk.Button(mid, text="アクセント編集 ▼", command=self.toggle_accent_panel)
+        self.btn_acc.pack(side="right")
+        self._build_accent_panel(tab, mid)
 
         lab = ttk.Frame(tab)
         lab.pack(fill="x", pady=(10, 0))
@@ -370,6 +378,151 @@ class App:
         self.l_after.insert("1.0", self.out_text.get("1.0", "end-1c"))
         self.nb.select(1)
         self.do_learn()
+
+    # ── アクセント編集（文節ごとの表示とボタン） ─────
+    def _build_accent_panel(self, tab, anchor):
+        self._acc_shown = False
+        self._acc_added = 0          # 開いたときに広げたウィンドウの高さ
+        self._acc_anchor = anchor
+        ap = ttk.Frame(tab)
+        ttk.Label(ap, text="下の変換結果を、文節ごとに表示しています。文字の上のボタンを押すと、その文字にアクセント（'）を付けます。"
+                           "同じ文節の他のアクセントは外れ、もう一度押すと外れます（平板）。",
+                  foreground="#666", wraplength=990, justify="left").pack(anchor="w")
+        body = ttk.Frame(ap)
+        body.pack(fill="x", pady=(2, 0))
+        cv = tk.Canvas(body, height=186, bg="white", highlightthickness=1, highlightbackground="#b8bec8")
+        sb = ttk.Scrollbar(body, command=cv.yview)
+        cv.configure(yscrollcommand=sb.set)
+        cv.pack(side="left", fill="x", expand=True)
+        sb.pack(side="right", fill="y")
+        cv.bind("<Configure>", lambda e: self._draw_accent_panel())
+        cv.bind("<MouseWheel>", lambda e: cv.yview_scroll(-1 if e.delta > 0 else 1, "units"))
+        cv.bind("<Button-4>", lambda e: cv.yview_scroll(-1, "units"))
+        cv.bind("<Button-5>", lambda e: cv.yview_scroll(1, "units"))
+        self.acc_panel, self.acc_cv = ap, cv
+        fam = self.f_text[0]
+        self.f_acc = tkfont.Font(root=self.root, family=fam, size=14)
+        self.f_acc_b = tkfont.Font(root=self.root, family=fam, size=14, weight="bold")
+        self.f_acc_s = tkfont.Font(root=self.root, family=fam, size=10)
+
+    def toggle_accent_panel(self, show=None):
+        show = (not self._acc_shown) if show is None else show
+        if show == self._acc_shown:
+            return
+        root = self.root
+        root.update_idletasks()
+        resizable = root.state() == "normal"
+        w, h = root.winfo_width(), root.winfo_height()
+        if show:
+            self.acc_panel.pack(fill="x", after=self._acc_anchor, pady=(8, 0))
+            root.update_idletasks()
+            if resizable:
+                # パネルの分だけウィンドウを縦に広げる（画面に収まる範囲で）
+                new_h = min(h + self.acc_panel.winfo_reqheight() + 8, max(h, root.winfo_screenheight() - 80))
+                self._acc_added = new_h - h
+                root.geometry(f"{w}x{new_h}")
+        else:
+            self.acc_panel.pack_forget()
+            if resizable and self._acc_added:
+                root.geometry(f"{w}x{max(h - self._acc_added, 200)}")
+            self._acc_added = 0
+        self._acc_shown = show
+        self.btn_acc.configure(text="アクセント編集 ▲" if show else "アクセント編集 ▼")
+        self._draw_accent_panel()
+
+    def _draw_accent_panel(self):
+        if not getattr(self, "_acc_shown", False):
+            return
+        cv = self.acc_cv
+        top = cv.yview()[0]
+        cv.delete("all")
+        s = self.out_text.get("1.0", "end-1c")
+        W = max(cv.winfo_width(), 300) - 12
+        if not s.strip():
+            cv.create_text(12, 14, anchor="nw", fill="#888", font=self.f_ui,
+                           text="変換すると、ここに文節ごとに表示されます。")
+            cv.configure(scrollregion=(0, 0, W, 60))
+            return
+        BTN, ROW, X0 = 14, 58, 10       # ボタンの大きさ・行の高さ・左端
+        x, y = X0, 8
+        ty = BTN + 20                    # ボタンの上端から文字の中心まで
+        for idx, it in enumerate(core.split_phrases(s)):
+            if isinstance(it, core.Sep):
+                if it.text == "\n":
+                    x, y = X0, y + ROW + 6
+                    continue
+                sw = self.f_acc.measure(it.text) + 6
+                if x + sw > W:
+                    x, y = X0, y + ROW
+                cv.create_text(x + sw / 2, y + ty, text=it.text, fill=COL_MK_SEP, font=self.f_acc)
+                x += sw
+                continue
+            # 文節はなるべく途中で折り返さず、まるごと次の行へ送る
+            fonts = [self.f_acc_s if u.text.startswith("<") else self.f_acc_b for u in it.units]
+            total = sum(max(f.measure(u.text.lstrip("_")[:14]), 18) + 4 for f, u in zip(fonts, it.units))
+            if x > X0 and x + total > W and total <= W - X0:
+                x, y = X0, y + ROW
+            seg_x = x
+            for k, u in enumerate(it.units):
+                accented = k in it.accents
+                disp = u.text.lstrip("_")
+                if disp.startswith("<"):
+                    disp = disp if len(disp) <= 14 else disp[:13] + "…>"
+                    font = self.f_acc_s
+                else:
+                    font = self.f_acc_b if accented else self.f_acc
+                uw = max(font.measure(disp), 18) + 4
+                if x + uw > W and x > seg_x:
+                    self._acc_bg(seg_x, x, y, ROW)
+                    x = seg_x = X0
+                    y += ROW
+                cx = x + uw / 2
+                color = (COL_MK_ACCENT if accented else COL_MK_DEVOICE if u.devoiced
+                         else "#222" if u.can_accent else "#8a8f98")
+                tag = f"u{idx}_{k}"
+                cv.create_text(cx, y + ty, text=disp, fill=color, font=font, tags=(tag,))
+                if u.can_accent:
+                    cv.create_rectangle(cx - BTN / 2, y + 4, cx + BTN / 2, y + 4 + BTN,
+                                        fill=COL_MK_ACCENT if accented else "#eef1f6",
+                                        outline=COL_MK_ACCENT if accented else "#9aa3b2",
+                                        tags=(tag, "btn", f"b{idx}_{k}"))
+                    cv.tag_bind(tag, "<Button-1>", lambda e, i=idx, k=k: self._on_accent_click(i, k))
+                    cv.tag_bind(tag, "<Enter>", lambda e, t=f"b{idx}_{k}", a=accented: self._acc_hover(t, a, True))
+                    cv.tag_bind(tag, "<Leave>", lambda e, t=f"b{idx}_{k}", a=accented: self._acc_hover(t, a, False))
+                x += uw
+            self._acc_bg(seg_x, x, y, ROW)
+            x += 2
+        cv.configure(scrollregion=(0, 0, W, y + ROW + 4))
+        cv.yview_moveto(top)
+
+    def _acc_bg(self, x1, x2, y, row):
+        """文節のまとまりを、薄い背景で示す"""
+        if x2 > x1:
+            r = self.acc_cv.create_rectangle(x1 - 1, y + 1, x2 + 1, y + row - 8, fill="#f4f6fa", outline="#dde2ea")
+            self.acc_cv.tag_lower(r)
+
+    def _acc_hover(self, tag, accented, on):
+        cv = self.acc_cv
+        cv.configure(cursor="hand2" if on else "")
+        if not accented:
+            cv.itemconfigure(tag, fill="#ffd2cf" if on else "#eef1f6")
+
+    def _on_accent_click(self, idx, k):
+        t = self.out_text
+        items = core.split_phrases(t.get("1.0", "end-1c"))
+        if idx >= len(items) or not isinstance(items[idx], core.Phrase) or k >= len(items[idx].units):
+            return
+        dels, ins = core.accent_edits(items[idx], k)
+        t.edit_separator()
+        if ins is not None:
+            t.insert(f"1.0+{ins}c", core.ACCENT)
+        for d in sorted(dels, reverse=True):
+            pos = d if ins is None or d < ins else d + 1
+            t.delete(f"1.0+{pos}c")
+        t.edit_separator()
+        self._show_issues(core.validate(t.get("1.0", "end-1c")))
+        u = items[idx].units[k].text.lstrip("_")
+        self._refresh_status(f"「{u}」にアクセントを付けました" if ins is not None else "アクセントを外しました（平板）")
 
     # ── 試聴（AquesTalkPlayer） ─────────────────────
     def _preview_text(self) -> str:
