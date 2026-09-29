@@ -151,7 +151,7 @@ class App:
         self.conf["accent_panel"] = bool(self._acc_shown)
         self.conf["aquestalk_player"] = self.player_path.get().strip()
         self.conf["voice_preset"] = self.voice.get().strip()
-        self.conf["voice_presets"] = list(self.voice_box["values"])
+        self.conf["voice_presets"] = self._used_voices[:20]
         try:
             with open(CONF_PATH, "w", encoding="utf-8") as f:
                 json.dump(self.conf, f, ensure_ascii=False, indent=1)
@@ -276,13 +276,16 @@ class App:
         self.btn_stop = ttk.Button(pv, text="■ 停止", command=self.stop_preview)
         self.btn_stop.pack(side="left", padx=(4, 12))
         ttk.Label(pv, text="声（プリセット）:").pack(side="left")
-        presets = list(self.conf.get("voice_presets") or DEFAULT_PRESETS)
-        last = self.conf.get("voice_preset", presets[0] if presets else "")
-        if last and last not in presets:
-            presets.insert(0, last)
+        # 候補 = このツールで再生できた名前（新しい順）＋ AquesTalkPlayer.preset にあるプリセット
+        self._used_voices = list(self.conf.get("voice_presets") or DEFAULT_PRESETS)
+        self._player_presets: dict[str, bool] = {}   # プリセット名 → 棒読みか
+        last = self.conf.get("voice_preset", self._used_voices[0] if self._used_voices else "")
         self.voice = tk.StringVar(value=last)
-        self.voice_box = ttk.Combobox(pv, textvariable=self.voice, values=presets, width=16, font=self.f_ui)
+        self.voice_box = ttk.Combobox(pv, textvariable=self.voice, width=16, font=self.f_ui,
+                                      postcommand=self._refresh_voice_list)
         self.voice_box.pack(side="left", padx=4)
+        self.voice_box.bind("<<ComboboxSelected>>", lambda e: self._warn_bouyomi())
+        self._refresh_voice_list()
         self.btn_open_player = ttk.Button(pv, text="AquesTalkPlayer を開く", command=self.open_player)
         self.btn_open_player.pack(side="left", padx=(8, 0))
         if IS_WINDOWS:
@@ -544,8 +547,27 @@ class App:
         return out
 
     def _remember_voice(self, name):
-        vals = [v for v in self.voice_box["values"] if v != name]
-        self.voice_box["values"] = [name] + vals if name else vals
+        if name:
+            self._used_voices = [name] + [v for v in self._used_voices if v != name]
+        self._refresh_voice_list()
+
+    def _refresh_voice_list(self):
+        """プルダウンを開くたびに AquesTalkPlayer.preset を読み直す（AquesTalkPlayer で作ったプリセットもすぐ出る）"""
+        exe = self.player_path.get().strip()
+        found = core.load_player_presets(os.path.join(os.path.dirname(exe), "AquesTalkPlayer.preset")) if exe else []
+        self._player_presets = dict(found)
+        names = self._used_voices + [n for n, _ in found if n not in self._used_voices]
+        self.voice_box["values"] = names
+
+    def _warn_bouyomi(self, voice=None) -> str:
+        """棒読みがオンのプリセットなら、ステータス欄で知らせる（その文を返す）"""
+        voice = self.voice.get().strip() if voice is None else voice
+        if self._player_presets.get(voice):
+            msg = (f"「{voice}」は棒読みがオンなので、アクセント（'）は効きません。"
+                   "［AquesTalkPlayer を開く］で棒読みを外し、［Add］で自分用のプリセットを作ってください")
+            self._refresh_status(msg)
+            return msg
+        return ""
 
     def _player_exe(self):
         """設定された AquesTalkPlayer.exe の場所。未設定・見つからないときは案内して None。"""
@@ -649,7 +671,8 @@ class App:
         self._wav = wav
         try:
             winsound.PlaySound(wav, winsound.SND_FILENAME | winsound.SND_ASYNC)
-            self._refresh_status(f"試聴: 再生中 — {self._preview_said}")
+            if not self._warn_bouyomi(voice):
+                self._refresh_status(f"試聴: 再生中 — {self._preview_said}")
         except RuntimeError as ex:
             messagebox.showerror(APP_NAME, f"音声を再生できませんでした。\n{ex}")
 
@@ -958,6 +981,7 @@ class App:
             filetypes=[("AquesTalkPlayer", "AquesTalkPlayer.exe"), ("実行ファイル", "*.exe"), ("すべて", "*.*")])
         if p:
             self.player_path.set(os.path.normpath(p))
+            self._refresh_voice_list()
             self._save_conf()
             self._refresh_status("AquesTalkPlayer の場所を保存しました")
 

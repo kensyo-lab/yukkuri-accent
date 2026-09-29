@@ -11,8 +11,10 @@
 from __future__ import annotations
 
 import copy
+import csv
 import datetime as _dt
 import difflib
+import io
 import json
 import os
 import re
@@ -766,6 +768,32 @@ class Sep:
     start: int
     end: int
     text: str            # 区切り記号（/ 、 など）。改行は "\n" 1文字で1つ
+
+
+def load_player_presets(path: str) -> list[tuple[str, bool]]:
+    """AquesTalkPlayer.preset（CSV）から (プリセット名, 棒読みか) の一覧を読む。読めなければ空。
+    1行目は見出し（プリセット名,棒読み,エンジン,…）。文字コードは分からないので順に試す。"""
+    try:
+        with open(path, "rb") as f:
+            raw = f.read()
+    except OSError:
+        return []
+    encs = ("utf-16",) if raw[:2] in (b"\xff\xfe", b"\xfe\xff") else ("utf-8-sig", "cp932")
+    for enc in encs:
+        try:
+            text = raw.decode(enc)
+            break
+        except UnicodeDecodeError:
+            continue
+    else:
+        return []
+    out = []
+    for row in csv.reader(io.StringIO(text)):
+        name = row[0].strip() if row else ""
+        if not name or name == "プリセット名":
+            continue
+        out.append((name, len(row) > 1 and row[1].strip().lower() == "true"))
+    return out
 
 
 def split_phrases(s: str) -> list[Phrase | Sep]:
