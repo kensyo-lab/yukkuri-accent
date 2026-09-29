@@ -89,6 +89,7 @@ class App:
 
         self.color_marks = tk.BooleanVar(value=self.conf.get("color_marks", True))
         self.player_path = tk.StringVar(value=self.conf.get("aquestalk_player", ""))
+        self.preset_info = tk.StringVar()   # 設定タブ: プリセットを読めたかどうか
         self._preview_gen = 0      # 試聴の世代。停止や新しい試聴で古い結果を捨てる
         self._proc = None          # 書き出し中の AquesTalkPlayer
         self._wav = None           # いま再生している一時WAV
@@ -115,7 +116,7 @@ class App:
             root.bind_all(k, lambda e: (self.copy_output(), "break")[1])
         root.protocol("WM_DELETE_WINDOW", self.on_close)
         if self.conf.get("accent_panel"):
-            root.after_idle(lambda: self.toggle_accent_panel(True))
+            self._open_panel_at_start()
 
     # ── 数字の読み表 ────────────────────────────────
     def _ensure_numbers_file(self):
@@ -410,14 +411,28 @@ class App:
         self.f_acc_b = tkfont.Font(root=self.root, family=fam, size=14, weight="bold")
         self.f_acc_s = tkfont.Font(root=self.root, family=fam, size=10)
 
+    def _open_panel_at_start(self):
+        """起動時に開いておく。ウィンドウがまだ画面に出ていないので大きさは測れない（1ピクセルと返る）。
+        既定の大きさにパネルの分を足して始める"""
+        root = self.root
+        self.acc_panel.pack(fill="x", after=self._acc_anchor, pady=(8, 0))
+        root.update_idletasks()
+        w, h = 1040, 720
+        new_h = min(h + self.acc_panel.winfo_reqheight() + 8, max(h, root.winfo_screenheight() - 80))
+        self._acc_added = new_h - h
+        root.geometry(f"{w}x{new_h}")
+        self._acc_shown = True
+        self.btn_acc.configure(text="アクセント編集 ▲")
+
     def toggle_accent_panel(self, show=None):
         show = (not self._acc_shown) if show is None else show
         if show == self._acc_shown:
             return
         root = self.root
         root.update_idletasks()
-        resizable = root.state() == "normal"
         w, h = root.winfo_width(), root.winfo_height()
+        # 最大化中や、まだ画面に出ていないとき（大きさが測れない）は、ウィンドウの大きさを変えない
+        resizable = root.state() == "normal" and root.winfo_ismapped() and h > 100
         if show:
             self.acc_panel.pack(fill="x", after=self._acc_anchor, pady=(8, 0))
             root.update_idletasks()
@@ -554,8 +569,15 @@ class App:
     def _refresh_voice_list(self):
         """プルダウンを開くたびに AquesTalkPlayer.preset を読み直す（AquesTalkPlayer で作ったプリセットもすぐ出る）"""
         exe = self.player_path.get().strip()
-        found = core.load_player_presets(os.path.join(os.path.dirname(exe), "AquesTalkPlayer.preset")) if exe else []
+        path = os.path.join(os.path.dirname(exe), "AquesTalkPlayer.preset") if exe else ""
+        found = core.load_player_presets(path) if path else []
         self._player_presets = dict(found)
+        if not path:
+            self.preset_info.set("AquesTalkPlayer のプリセット: （AquesTalkPlayer.exe の場所が未設定）")
+        elif found:
+            self.preset_info.set(f"AquesTalkPlayer のプリセット: {len(found)} 件を読み込みました（{path}）")
+        else:
+            self.preset_info.set(f"AquesTalkPlayer のプリセット: 読み込めませんでした（{path}）")
         names = self._used_voices + [n for n, _ in found if n not in self._used_voices]
         self.voice_box["values"] = names
 
@@ -962,6 +984,7 @@ class App:
         b.pack(side="left", padx=(6, 0))
         if not IS_WINDOWS:
             b.state(["disabled"])
+        ttk.Label(tab, textvariable=self.preset_info, foreground="#444").pack(anchor="w")
         note = ("AquesTalkPlayer は株式会社アクエストのソフトです。このツールには同梱していないので、"
                 "公式サイトから各自で入手してください（個人の非営利使用は無料、営利目的には使用ライセンスの購入が必要です）。\n"
                 "声は、変換タブの「声（プリセット）」に AquesTalkPlayer のプリセット名を入れて選びます。"
