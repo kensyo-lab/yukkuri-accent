@@ -573,11 +573,11 @@ class App:
         found = core.load_player_presets(path) if path else []
         self._player_presets = dict(found)
         if not path:
-            self.preset_info.set("AquesTalkPlayer のプリセット: （AquesTalkPlayer.exe の場所が未設定）")
+            self.preset_info.set("AquesTalkPlayerのプリセット：（AquesTalkPlayer.exeの場所が未設定）")
         elif found:
-            self.preset_info.set(f"AquesTalkPlayer のプリセット: {len(found)} 件を読み込みました（{path}）")
+            self.preset_info.set(f"AquesTalkPlayerのプリセット：{len(found)}件を読み込みました\n{path}")
         else:
-            self.preset_info.set(f"AquesTalkPlayer のプリセット: 読み込めませんでした（{path}）")
+            self.preset_info.set(f"AquesTalkPlayerのプリセット：読み込めませんでした\n{path}")
         names = self._used_voices + [n for n, _ in found if n not in self._used_voices]
         self.voice_box["values"] = names
 
@@ -984,16 +984,16 @@ class App:
         b.pack(side="left", padx=(6, 0))
         if not IS_WINDOWS:
             b.state(["disabled"])
-        ttk.Label(tab, textvariable=self.preset_info, foreground="#444").pack(anchor="w")
-        note = ("AquesTalkPlayer は株式会社アクエストのソフトです。このツールには同梱していないので、"
+        ttk.Label(tab, textvariable=self.preset_info, foreground="#444", wraplength=960).pack(anchor="w")
+        note = ("AquesTalkPlayerは株式会社アクエストのソフトです。このツールには同梱していないので、"
                 "公式サイトから各自で入手してください（個人の非営利使用は無料、営利目的には使用ライセンスの購入が必要です）。\n"
-                "声は、変換タブの「声（プリセット）」に AquesTalkPlayer のプリセット名を入れて選びます。"
-                "AquesTalkPlayer で自分のキャラクター用のプリセットを作れば、その名前も使えます。\n"
+                "声は、変換タブの「声（プリセット）」にAquesTalkPlayerのプリセット名を入れて選びます。"
+                "AquesTalkPlayerで自分のキャラクター用のプリセットを作れば、その名前も使えます。\n"
                 "【大事】最初からある「まりさ」「れいむ」は棒読みがオンで、変更しても次の起動で元に戻ります。"
-                "アクセントを効かせるには、［AquesTalkPlayer を開く］で開き、「棒読み」を外して［Add］で"
-                "自分用のプリセット（例: まりさ抑揚）を作り、その名前を変換タブの「声（プリセット）」に入れてください。")
+                "アクセントを効かせるには、［AquesTalkPlayerを開く］で開き、「棒読み」を外して［Add］で"
+                "自分用のプリセット（例：まりさ抑揚）を作り、その名前を変換タブの「声（プリセット）」に入れてください。")
         if not IS_WINDOWS:
-            note += "\n\n※ AquesTalkPlayer は Windows 用のソフトなので、この環境では試聴できません。"
+            note += "\n\n※ AquesTalkPlayerは Windows 用のソフトなので、この環境では試聴できません。"
         ttk.Label(tab, text=note, foreground="#444", wraplength=960, justify="left").pack(anchor="w", pady=(4, 0))
 
     def browse_player(self):
