@@ -42,3 +42,27 @@ check(click("あ'い'うえ", 0, "う"), "あいう'え")
 check(click("これわ/て_スと/ぶ'んしょう", 1, "て"), "これわ/て'_スと/ぶ'んしょう")
 check(click("い'ち/に\nさ'ん", 2, "さ"), "い'ち/に\nさん")
 print(f"{ok} 件 OK")
+
+# 打ったそばから直す記号（文字数は変えない・タグの中は触らない）
+from accent_core import mark_fixes
+def fixed(s):
+    cs = list(s)
+    for i, ch in mark_fixes(s):
+        cs[i] = ch
+    return "".join(cs)
+ok2 = 0
+for src, want in [
+    ("ぶ’んしょう", "ぶ'んしょう"),
+    ("こんにちわ／げんき？", "こんにちわ/げんき？"),
+    ("ま＿すです", "ま_スです"),          # ＿ も _ の後のひらがなも直す
+    ("ま_すです", "ま_スです"),
+    ("あ，い＋う；え", "あ,い+う;え"),
+    ("なに?", "なに？"),
+    ("<NUMK VAL=1’>’", "<NUMK VAL=1’>'"),  # タグの中はそのまま
+    ("すでに/ただしい'かたち", "すでに/ただしい'かたち"),
+]:
+    got = fixed(src)
+    assert got == want, (src, got, want)
+    assert len(got) == len(src)
+    ok2 += 1
+print(f"記号の自動修正 {ok2} 件 OK")

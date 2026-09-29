@@ -209,9 +209,24 @@ class App:
     def _on_modified(self, t):
         if t.edit_modified():
             t.edit_modified(False)
+            t.after_idle(lambda: self._fix_marks(t))
             t.after_idle(lambda: self._paint_marks(t))
             if t is getattr(self, "out_text", None):
                 t.after_idle(self._draw_accent_panel)
+
+    def _fix_marks(self, t):
+        """全角の ’ ＿ ／ などを、打ったそばから AquesTalk の形（半角）に直す。YMM4 は全角を受け付けないため"""
+        s = t.get("1.0", "end-1c")
+        fixes = core.mark_fixes(s)
+        if not fixes:
+            return
+        shown = "、".join(dict.fromkeys(f"{s[i]}→{ch}" for i, ch in fixes))
+        for i, ch in fixes:
+            idx = f"1.0+{i}c"
+            tags = [g for g in t.tag_names(idx) if g != "sel"]
+            t.delete(idx)
+            t.insert(idx, ch, tags)
+        self._refresh_status(f"YMM4（AquesTalk）で使える形に直しました：{shown}")
 
     def _paint_marks(self, t):
         for tag in ("mk_acc", "mk_sep", "mk_dv"):

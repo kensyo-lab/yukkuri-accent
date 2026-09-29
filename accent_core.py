@@ -91,6 +91,27 @@ def _normalize_plain(s: str) -> str:
     return "".join(out)
 
 
+def mark_fixes(s: str) -> list[tuple[int, str]]:
+    """入力しながらその場で直す所を返す: [(位置, 直した文字)]。
+    全角・似た形の記号（’ ＿ ／ ？ など）→ AquesTalk が受け付ける形、_ の直後のひらがな → カタカナ。
+    normalize と違って文字数は変えない（空白の削除やカタカナ→ひらがなはしない）。<タグ> の中には触らない。"""
+    tags = [(m.start(), m.end()) for m in TAG_RE.finditer(s)]
+    out, prev, t = [], "", 0
+    for i, c in enumerate(s):
+        while t < len(tags) and tags[t][1] <= i:
+            t += 1
+        if t < len(tags) and tags[t][0] <= i:
+            prev = c
+            continue
+        new = WIDTH_MAP.get(c, c)
+        if prev == DEVOICE and is_hira(new):
+            new = to_kata(new)
+        if new != c:
+            out.append((i, new))
+        prev = new
+    return out
+
+
 def normalize(s: str) -> str:
     """記号・仮名をそろえる。<タグ> の中身には触らない。"""
     s = s.replace("\r\n", "\n")
