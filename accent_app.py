@@ -663,7 +663,7 @@ class App:
         self.voice_box["values"] = names
 
     def _warn_bouyomi(self, voice=None) -> str:
-        """棒読みがオンのプリセットなら、ステータス欄で知らせる（その文を返す）"""
+        """棒読みがオンのプリセットなら、メッセージ欄で知らせる（その文を返す）"""
         voice = self.voice.get().strip() if voice is None else voice
         if self._player_presets.get(voice):
             parts = [(f"「{voice}」は棒読みがオンなので、アクセント（'）が効きません。", "crit"),

@@ -70,7 +70,7 @@ jobs:
           $name = "yukkuri-accent-$env:TAG-windows"
           New-Item -ItemType Directory -Force "pkg/yukkuri-accent" | Out-Null
           Copy-Item dist/yukkuri-accent.exe pkg/yukkuri-accent/
-          Copy-Item README.md, LICENSE pkg/yukkuri-accent/
+          Copy-Item README.md, FAQ.md, LICENSE pkg/yukkuri-accent/
           Copy-Item -Recurse dictionaries pkg/yukkuri-accent/
           Compress-Archive -Path pkg/yukkuri-accent -DestinationPath "$name.zip"
           "ZIP_NAME=$name.zip" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
