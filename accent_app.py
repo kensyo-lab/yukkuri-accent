@@ -39,6 +39,18 @@ COL_MK_ACCENT = "#d0342c"      # ' アクセント
 COL_MK_SEP = "#8a8f98"         # / , + ; 区切り
 COL_MK_DEVOICE = "#1f5fbf"     # _ 無声化
 
+# メッセージ欄の色（背景・左の帯・強調する文字）
+#   crit（最重要・赤）: 手を打たないと期待どおりに読まれない（棒読み・エラーが残っている・試聴の失敗）
+#   warn（重要・橙）  : ツールが文字を書き換えた／確かめてほしい所がある（記号の自動修正・注意）
+#   info（通常）      : 済んだことのお知らせ
+MSG_STYLE = {
+    "info": {"bg": "#f3f5f8", "bar": "#9aa3b2", "fg": "#222222"},
+    "warn": {"bg": "#fff4e3", "bar": "#e08a00", "fg": "#b35c00"},
+    "crit": {"bg": "#ffecec", "bar": "#d0342c", "fg": "#c0201a"},
+}
+MSG_LINES = 3                  # メッセージ欄は最初から3行分の高さを取っておく
+WIN_W, WIN_H = 1040, 780       # 起動時のウィンドウの大きさ
+
 IS_WINDOWS = sys.platform.startswith("win")
 DEFAULT_PRESETS = ("まりさ", "れいむ")
 PLAYER_TIMEOUT = 60   # AquesTalkPlayer の書き出しを待つ上限（秒）
@@ -62,8 +74,8 @@ class App:
     def __init__(self, root: tk.Tk):
         self.root = root
         root.title(f"{APP_NAME} v{VERSION}")
-        root.geometry("1040x720")
-        root.minsize(820, 560)
+        root.geometry(f"{WIN_W}x{WIN_H}")
+        root.minsize(820, 600)
         icon = os.path.join(RES_DIR, "assets", "icon.png")
         if os.path.exists(icon):
             try:
@@ -103,12 +115,9 @@ class App:
         self._build_dict(nb)
         self._build_settings(nb)
 
-        self.status = tk.StringVar()
-        # 長い案内は2行以上に折り返す（幅はウィンドウに合わせる）。ノートより先に場所を取っておく
-        st = ttk.Label(root, textvariable=self.status, anchor="w", justify="left", padding=(10, 4))
-        st.pack(fill="x", side="bottom", before=nb)
-        root.bind("<Configure>", lambda e: e.widget is root and st.configure(wraplength=max(root.winfo_width() - 24, 200)))
-        self._refresh_status()
+        self._build_message_bar(nb)
+        self._refresh_status("YMM4 でセリフの読みをコピーして［貼り付けて変換］（Ctrl+Shift+V）を押すと、"
+                             "変換した結果がクリップボードに入ります。そのまま YMM4 に貼り付けてください。")
 
         for w in (self.in_text, self.out_text):
             w.bind("<Control-Return>", lambda e: self.do_convert())
@@ -175,13 +184,57 @@ class App:
         except Exception as ex:
             messagebox.showerror(APP_NAME, f"辞書を保存できませんでした。\n{ex}")
 
-    def _refresh_status(self, extra: str = ""):
-        if not hasattr(self, "status"):
+    # ── メッセージ欄 ────────────────────────────────
+    def _build_message_bar(self, nb):
+        """ウィンドウ下のメッセージ欄。3行分の高さを最初から取っておき、長い案内でも大きさが変わらない"""
+        st = MSG_STYLE["info"]
+        box = tk.Frame(self.root, bg=st["bg"], highlightthickness=1, highlightbackground="#c9ced6")
+        box.pack(fill="x", side="bottom", before=nb, padx=8, pady=(6, 8))   # ノートより先に場所を取る
+        bar = tk.Frame(box, width=6, bg=st["bar"])
+        bar.pack(side="left", fill="y")
+        fam = self.f_ui[0]
+        self.dict_info = tk.StringVar()
+        lab = tk.Label(box, textvariable=self.dict_info, font=(fam, 9), fg="#666", bg=st["bg"], anchor="ne")
+        lab.pack(side="right", anchor="n", padx=8, pady=5)      # 右端に先に置く（メッセージに押し出されないように）
+        t = tk.Text(box, height=MSG_LINES, width=1, wrap="char", font=(fam, 10, "bold"), relief="flat", bd=0,
+                    padx=10, pady=5, bg=st["bg"], fg=st["fg"], cursor="arrow", takefocus=0,
+                    highlightthickness=0, spacing1=1, spacing3=1)
+        t.pack(side="left", fill="x", expand=True)
+        for lv, c in MSG_STYLE.items():
+            t.tag_configure(lv, foreground=c["fg"])
+        t.configure(state="disabled")
+        self._msg_box, self._msg_bar, self._msg_text, self._msg_dict = box, bar, t, lab
+        self.status = tk.StringVar()     # 表示中のメッセージ（文字だけ）
+
+    def _refresh_status(self, extra="", level=None):
+        """メッセージ欄を書き換える。
+        extra: 文字列、または [(文字列, "warn"/"crit"/None), ...]（要点だけ色を付ける）。空なら辞書の件数だけ更新。
+        level: 欄全体の色。省略すると、中で一番重いもの（なければ info）"""
+        if not hasattr(self, "_msg_text"):
             return
-        s = f"辞書：{len(self.dic.entries)}件（{os.path.basename(DICT_PATH)}）"
-        if extra:
-            s += "　｜　" + extra
-        self.status.set(s)
+        self.dict_info.set(f"辞書：{len(self.dic.entries)}件（{os.path.basename(DICT_PATH)}）")
+        if not extra:
+            return
+        parts = [(extra, None)] if isinstance(extra, str) else list(extra)
+        if level is None:
+            levels = {lv for _, lv in parts}
+            level = "crit" if "crit" in levels else "warn" if "warn" in levels else "info"
+        st = MSG_STYLE[level]
+        for w in (self._msg_box, self._msg_text, self._msg_dict):
+            w.configure(bg=st["bg"])
+        self._msg_bar.configure(bg=st["bar"])
+        t = self._msg_text
+        t.configure(state="normal")
+        t.delete("1.0", "end")
+        for text, lv in parts:
+            t.insert("end", text, (lv,) if lv else ())
+        t.configure(state="disabled")
+        self.status.set("".join(x for x, _ in parts))
+
+    def _count_parts(self, n_err, n_warn):
+        """「エラー n ／ 注意 m」を、数があるときだけ色付きで"""
+        return [(f"エラー {n_err}", "crit" if n_err else None), (" ／ ", None),
+                (f"注意 {n_warn}", "warn" if n_warn else None)]
 
     def _text(self, parent, height):
         frm = ttk.Frame(parent)
@@ -226,7 +279,7 @@ class App:
             tags = [g for g in t.tag_names(idx) if g != "sel"]
             t.delete(idx)
             t.insert(idx, ch, tags)
-        self._refresh_status(f"YMM4（AquesTalk）で使える形に直しました：{shown}")
+        self._refresh_status([("記号を YMM4（AquesTalk）で使える形に直しました：", None), (shown, "warn")])
 
     def _paint_marks(self, t):
         for tag in ("mk_acc", "mk_sep", "mk_dv"):
@@ -344,10 +397,14 @@ class App:
             self._fill_dict()   # 使用回数の表示を更新
         n_err = sum(i.level == "error" for i in res.issues)
         n_warn = len(res.issues) - n_err
-        extra = f"置き換え {len(res.applied)} か所 ／ エラー {n_err} ／ 注意 {n_warn}"
+        parts = [(f"変換しました：辞書で置き換え {len(res.applied)} か所 ／ ", None)] + self._count_parts(n_err, n_warn)
         if self.auto_copy.get() and res.text:
-            extra += "　— コピーしました"
-        self._refresh_status(extra)
+            parts.append(("　— コピーしました", None))
+        if n_err:
+            parts.append(("\n赤い所は YMM4 で正しく読まれません。下のチェック結果を見て直してください", "crit"))
+        elif n_warn:
+            parts.append(("\n橙の所を確かめてください（下のチェック結果をクリックすると選択します）", "warn"))
+        self._refresh_status(parts)
         return "break"
 
     def recheck(self):
@@ -358,7 +415,7 @@ class App:
             self.out_text.insert("1.0", norm)
         self._show_issues(core.validate(norm))
         n_err = sum(i.level == "error" for i in self._issues)
-        self._refresh_status(f"再チェック: エラー {n_err} ／ 注意 {len(self._issues) - n_err}")
+        self._refresh_status([("再チェック：", None)] + self._count_parts(n_err, len(self._issues) - n_err))
 
     def _show_issues(self, issues):
         self._issues = issues
@@ -391,8 +448,14 @@ class App:
     def copy_output(self):
         s = self.out_text.get("1.0", "end-1c")
         if s:
-            self._copy(core.normalize(s))
-            self._refresh_status("コピーしました")
+            norm = core.normalize(s)
+            self._copy(norm)
+            n_err = sum(i.level == "error" for i in core.validate(norm))
+            if n_err:
+                self._refresh_status([("コピーしました。", None),
+                                      (f"ただし、エラーが {n_err} か所残っています（YMM4 で正しく読まれません）", "crit")])
+            else:
+                self._refresh_status("コピーしました")
         return "break"
 
     def send_to_learn(self):
@@ -435,7 +498,7 @@ class App:
         root = self.root
         self.acc_panel.pack(fill="x", after=self._acc_anchor, pady=(8, 0))
         root.update_idletasks()
-        w, h = 1040, 720
+        w, h = WIN_W, WIN_H
         new_h = min(h + self.acc_panel.winfo_reqheight() + 8, max(h, root.winfo_screenheight() - 80))
         self._acc_added = new_h - h
         root.geometry(f"{w}x{new_h}")
@@ -603,10 +666,11 @@ class App:
         """棒読みがオンのプリセットなら、ステータス欄で知らせる（その文を返す）"""
         voice = self.voice.get().strip() if voice is None else voice
         if self._player_presets.get(voice):
-            msg = (f"「{voice}」は棒読みがオンなので、アクセント（'）が効きません。"
-                   "［AquesTalkPlayerを開く］→「棒読み」を外す→［Add］で自分用のプリセットを作ってください")
-            self._refresh_status(msg)
-            return msg
+            parts = [(f"「{voice}」は棒読みがオンなので、アクセント（'）が効きません。", "crit"),
+                     ("\n［AquesTalkPlayer を開く］→「棒読み」のチェックを外す→［Add］で自分用のプリセットを作り、"
+                      "その名前を「声（プリセット）」で選んでください", None)]
+            self._refresh_status(parts)
+            return "".join(x for x, _ in parts)
         return ""
 
     def _player_exe(self):
@@ -635,7 +699,8 @@ class App:
         try:
             subprocess.Popen([exe], cwd=os.path.dirname(exe), stdin=subprocess.DEVNULL,
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            self._refresh_status("AquesTalkPlayer を開きました（プリセットを変えたら［Set］で保存してください）")
+            self._refresh_status([("AquesTalkPlayer を開きました。", None),
+                                  ("最初からある「まりさ」「れいむ」は変更しても元に戻るので、［Add］で自分用のプリセットを作ってください", "warn")])
         except OSError as ex:
             messagebox.showerror(APP_NAME, f"AquesTalkPlayer を起動できませんでした。\n{exe}\n{ex}")
 
@@ -660,7 +725,7 @@ class App:
         args = [exe, "/T", "#>" + text, "/W", wav]
         if voice:
             args += ["/P", voice]
-        self._preview_said = text if len(text) <= 60 else text[:60] + "…"
+        self._preview_said = text if len(text) <= 120 else text[:120] + "…"
         self._refresh_status("試聴: 音声を作っています…")
         threading.Thread(target=self._synth, args=(gen, args, wav, voice), daemon=True).start()
 
@@ -702,7 +767,7 @@ class App:
             return
         if err:
             self._remove_file(wav)
-            self._refresh_status("試聴できませんでした")
+            self._refresh_status([("試聴できませんでした。", "crit"), ("\n" + err.split("\n")[0], None)])
             messagebox.showerror(APP_NAME, err)
             return
         self._remember_voice(voice)   # 使えたプリセットだけ候補に残す
@@ -712,7 +777,7 @@ class App:
         try:
             winsound.PlaySound(wav, winsound.SND_FILENAME | winsound.SND_ASYNC)
             if not self._warn_bouyomi(voice):
-                self._refresh_status(f"試聴: 再生中 — {self._preview_said}")
+                self._refresh_status(f"試聴：再生中（{voice or '前回のプリセット'}）\n{self._preview_said}")
         except RuntimeError as ex:
             messagebox.showerror(APP_NAME, f"音声を再生できませんでした。\n{ex}")
 
