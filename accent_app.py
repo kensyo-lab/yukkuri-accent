@@ -283,11 +283,13 @@ class App:
         self.voice = tk.StringVar(value=last)
         self.voice_box = ttk.Combobox(pv, textvariable=self.voice, values=presets, width=16, font=self.f_ui)
         self.voice_box.pack(side="left", padx=4)
+        self.btn_open_player = ttk.Button(pv, text="AquesTalkPlayer を開く", command=self.open_player)
+        self.btn_open_player.pack(side="left", padx=(8, 0))
         if IS_WINDOWS:
-            hint = "選択範囲があればその部分、なければ変換結果の全体を読み上げます"
+            hint = "選択範囲（なければ全体）を読み上げます"
         else:
             hint = "試聴は Windows 専用です（AquesTalkPlayer が Windows 用のため）"
-            for w in (self.btn_play, self.btn_stop, self.voice_box):
+            for w in (self.btn_play, self.btn_stop, self.voice_box, self.btn_open_player):
                 w.state(["disabled"])
         ttk.Label(pv, text=hint, foreground="#666").pack(side="left", padx=8)
 
@@ -545,20 +547,41 @@ class App:
         vals = [v for v in self.voice_box["values"] if v != name]
         self.voice_box["values"] = [name] + vals if name else vals
 
-    def preview(self):
-        if not IS_WINDOWS:
-            return
+    def _player_exe(self):
+        """設定された AquesTalkPlayer.exe の場所。未設定・見つからないときは案内して None。"""
         exe = self.player_path.get().strip()
         if not exe:
             messagebox.showinfo(APP_NAME, "試聴には AquesTalkPlayer が必要です。\n\n"
                                 "「設定」タブで AquesTalkPlayer.exe の場所を指定してください。\n"
                                 "（AquesTalkPlayer は株式会社アクエストの公式サイトから入手できます）")
             self.nb.select(self.settings_tab)
-            return
+            return None
         if not os.path.isfile(exe):
             messagebox.showerror(APP_NAME, f"AquesTalkPlayer が見つかりません。\n{exe}\n\n"
                                  "「設定」タブで AquesTalkPlayer.exe の場所を指定し直してください。")
             self.nb.select(self.settings_tab)
+            return None
+        return exe
+
+    def open_player(self):
+        """AquesTalkPlayer を画面つきで起動する（プリセットの「棒読み」などを直すため）。"""
+        if not IS_WINDOWS:
+            return
+        exe = self._player_exe()
+        if not exe:
+            return
+        try:
+            subprocess.Popen([exe], cwd=os.path.dirname(exe), stdin=subprocess.DEVNULL,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            self._refresh_status("AquesTalkPlayer を開きました（プリセットを変えたら［Set］で保存してください）")
+        except OSError as ex:
+            messagebox.showerror(APP_NAME, f"AquesTalkPlayer を起動できませんでした。\n{exe}\n{ex}")
+
+    def preview(self):
+        if not IS_WINDOWS:
+            return
+        exe = self._player_exe()
+        if not exe:
             return
         text = self._preview_text()
         if not text:
@@ -912,11 +935,16 @@ class App:
         e.pack(side="left", fill="x", expand=True, padx=6)
         e.bind("<FocusOut>", lambda ev: self._save_conf())
         ttk.Button(row, text="参照…", command=self.browse_player).pack(side="left")
+        b = ttk.Button(row, text="AquesTalkPlayer を開く", command=self.open_player)
+        b.pack(side="left", padx=(6, 0))
+        if not IS_WINDOWS:
+            b.state(["disabled"])
         note = ("AquesTalkPlayer は株式会社アクエストのソフトです。このツールには同梱していないので、"
                 "公式サイトから各自で入手してください（個人の非営利使用は無料、営利目的には使用ライセンスの購入が必要です）。\n"
                 "声は、変換タブの「声（プリセット）」に AquesTalkPlayer のプリセット名を入れて選びます。"
                 "AquesTalkPlayer で自分のキャラクター用のプリセットを作れば、その名前も使えます。\n"
-                "アクセントが効かず平坦に聞こえるときは、AquesTalkPlayer でプリセットの「棒読み」を外して［Set］で保存してください。")
+                "アクセントが効かず平坦に聞こえるときは、［AquesTalkPlayer を開く］で開き、プリセットの「棒読み」を外して［Set］で保存してください"
+                "（AquesTalkPlayer は最初から棒読みがオンのプリセットがあります）。")
         if not IS_WINDOWS:
             note += "\n\n※ AquesTalkPlayer は Windows 用のソフトなので、この環境では試聴できません。"
         ttk.Label(tab, text=note, foreground="#444", wraplength=960, justify="left").pack(anchor="w", pady=(4, 0))
