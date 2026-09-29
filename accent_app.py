@@ -104,7 +104,10 @@ class App:
         self._build_settings(nb)
 
         self.status = tk.StringVar()
-        ttk.Label(root, textvariable=self.status, anchor="w", padding=(10, 4)).pack(fill="x")
+        # 長い案内は2行以上に折り返す（幅はウィンドウに合わせる）。ノートより先に場所を取っておく
+        st = ttk.Label(root, textvariable=self.status, anchor="w", justify="left", padding=(10, 4))
+        st.pack(fill="x", side="bottom", before=nb)
+        root.bind("<Configure>", lambda e: e.widget is root and st.configure(wraplength=max(root.winfo_width() - 24, 200)))
         self._refresh_status()
 
         for w in (self.in_text, self.out_text):
@@ -175,7 +178,7 @@ class App:
     def _refresh_status(self, extra: str = ""):
         if not hasattr(self, "status"):
             return
-        s =f"辞書: {len(self.dic.entries)} 件（{os.path.basename(DICT_PATH)}）"
+        s = f"辞書：{len(self.dic.entries)}件（{os.path.basename(DICT_PATH)}）"
         if extra:
             s += "　｜　" + extra
         self.status.set(s)
@@ -585,8 +588,8 @@ class App:
         """棒読みがオンのプリセットなら、ステータス欄で知らせる（その文を返す）"""
         voice = self.voice.get().strip() if voice is None else voice
         if self._player_presets.get(voice):
-            msg = (f"「{voice}」は棒読みがオンなので、アクセント（'）は効きません。"
-                   "［AquesTalkPlayer を開く］で棒読みを外し、［Add］で自分用のプリセットを作ってください")
+            msg = (f"「{voice}」は棒読みがオンなので、アクセント（'）が効きません。"
+                   "［AquesTalkPlayerを開く］→「棒読み」を外す→［Add］で自分用のプリセットを作ってください")
             self._refresh_status(msg)
             return msg
         return ""
