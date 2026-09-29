@@ -943,8 +943,9 @@ class App:
                 "公式サイトから各自で入手してください（個人の非営利使用は無料、営利目的には使用ライセンスの購入が必要です）。\n"
                 "声は、変換タブの「声（プリセット）」に AquesTalkPlayer のプリセット名を入れて選びます。"
                 "AquesTalkPlayer で自分のキャラクター用のプリセットを作れば、その名前も使えます。\n"
-                "アクセントが効かず平坦に聞こえるときは、［AquesTalkPlayer を開く］で開き、プリセットの「棒読み」を外して［Set］で保存してください"
-                "（AquesTalkPlayer は最初から棒読みがオンのプリセットがあります）。")
+                "【大事】最初からある「まりさ」「れいむ」は棒読みがオンで、変更しても次の起動で元に戻ります。"
+                "アクセントを効かせるには、［AquesTalkPlayer を開く］で開き、「棒読み」を外して［Add］で"
+                "自分用のプリセット（例: まりさ抑揚）を作り、その名前を変換タブの「声（プリセット）」に入れてください。")
         if not IS_WINDOWS:
             note += "\n\n※ AquesTalkPlayer は Windows 用のソフトなので、この環境では試聴できません。"
         ttk.Label(tab, text=note, foreground="#444", wraplength=960, justify="left").pack(anchor="w", pady=(4, 0))
