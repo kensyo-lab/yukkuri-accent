@@ -149,6 +149,8 @@ YMM4側のクセもいくつか後始末します。
 | ファイル | 中身 |
 |---|---|
 | `FAQ.md` | よくある質問（困ったときの解決方法） |
+| `CHANGELOG.md` | 初版から最新版までの変更履歴（zip に同梱。`release-notes/` から自動で作ります） |
+| `release-notes/` | 版ごとのリリースノート |
 | `backup/` | 辞書の自動バックアップ（起動時などに作られます） |
 | `accent_core.py` | 変換・学習・検査のロジック（GUIなしでも使えます） |
 | `accent_app.py` | 画面（tkinter） |
@@ -156,6 +158,7 @@ YMM4側のクセもいくつか後始末します。
 | `yukkuri-accent.pyw` | Pythonでダブルクリック起動するためのファイル |
 | `assets/icon.png` | アプリのアイコン |
 | `tools/make_icon.py` | アイコンPNGから .ico を作る道具（ビルド時に自動で使われます） |
+| `tools/make_changelog.py` | リリースノートをまとめて CHANGELOG.md を作る道具（ビルド時に自動で使われます） |
 | `.github/workflows/release.yml` | `v` で始まるタグを付けると、Windows版を自動で作って Releases に置く設定 |
 | `tests/` | ビフォー／アフターの例と確認用スクリプト |
 

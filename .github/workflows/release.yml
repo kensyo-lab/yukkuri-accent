@@ -23,6 +23,8 @@ jobs:
       PYTHONUTF8: "1"   # 日本語の出力で文字化け・エラーにならないように
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # 変更履歴に各版の日付を入れるため、履歴をすべて取ってくる
 
       - uses: actions/setup-python@v5
         with:
@@ -73,6 +75,7 @@ jobs:
           New-Item -ItemType Directory -Force "pkg/yukkuri-accent" | Out-Null
           Copy-Item dist/yukkuri-accent.exe pkg/yukkuri-accent/
           Copy-Item README.md, FAQ.md, LICENSE pkg/yukkuri-accent/
+          python tools/make_changelog.py pkg/yukkuri-accent/CHANGELOG.md
           Copy-Item -Recurse dictionaries pkg/yukkuri-accent/
           Compress-Archive -Path pkg/yukkuri-accent -DestinationPath "$name.zip"
           "ZIP_NAME=$name.zip" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
