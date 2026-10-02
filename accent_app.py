@@ -653,7 +653,8 @@ class App:
                              command=lambda: (self._draw_accent_panel(), self._save_conf()))
         cb.pack(side="right", anchor="n")
         lbl = ttk.Label(hdr, text="下の変換結果を文節ごとに表示しています。文字の上のボタンで、その文字にアクセント（'）を付け外しします"
-                                  "（1つの文節に1か所）。線は音の高さで、上が高く下が低く、赤はアクセントで下がる所です。",
+                                  "（1つの文節に1か所）。線は音の高さで、上が高く下が低く、赤はアクセントで下がる所です。"
+                                  "線の点はつまんで上下に動かせます（クリックで高低を入れ替え）。",
                         foreground="#666", justify="left")
         lbl.pack(side="left", fill="x", expand=True)
         hdr.bind("<Configure>", lambda e: lbl.configure(wraplength=max(e.width - cb.winfo_width() - 16, 200)))
@@ -670,6 +671,13 @@ class App:
         cv.bind("<Button-5>", lambda e: cv.yview_scroll(1, "units"))
         self.acc_panel, self.acc_cv = ap, cv
         self.btn_acc.configure(text=self._acc_btn_text())
+        # 高低の線の点は、つまんで上下に動かせる（離した所の高さになるようにアクセントを置き直す）
+        self._dot_info, self._drag = {}, None
+        cv.tag_bind("dot", "<ButtonPress-1>", self._dot_press)
+        cv.tag_bind("dot", "<B1-Motion>", self._dot_motion)
+        cv.tag_bind("dot", "<ButtonRelease-1>", self._dot_release)
+        cv.tag_bind("dot", "<Enter>", lambda e: cv.configure(cursor="sb_v_double_arrow"))
+        cv.tag_bind("dot", "<Leave>", lambda e: self._drag or cv.configure(cursor=""))
 
     def _acc_btn_text(self):
         key = self._key("accent_panel")
@@ -735,9 +743,10 @@ class App:
         y_hi, y_lo = BTN + sc(10), BTN + sc(22)         # 高低の線（ボタンの上端から）
         ty = BTN + (sc(40) if pitch else sc(20))        # 文字の中心
         ROW = ty + sc(22)                               # 1行の高さ
-        R, LW = max(2, sc(3)), max(1, sc(2))            # 線の点の大きさ・太さ
+        R, LW = max(3, sc(4)), max(1, sc(2))            # 線の点の大きさ・太さ（点はつまめる大きさに）
         x, y = X0, sc(8)
         high_next = False                               # 「;」の次の文節は高く始まる
+        self._dot_info = {}
 
         def disp_of(u):
             d = u.text.lstrip("_")
@@ -757,7 +766,8 @@ class App:
                 cv.create_text(x + sw / 2, y + ty, text=it.text, fill=COL_MK_SEP, font=fa)
                 x += sw
                 continue
-            pat = core.pitch_pattern(it, high_next) if pitch else None
+            hs = high_next
+            pat = core.pitch_pattern(it, hs) if pitch else None
             high_next = False
             # 文節はなるべく途中で折り返さず、まるごと次の行へ送る
             fonts = [fas if u.text.startswith("<") else fab for u in it.units]
@@ -799,7 +809,10 @@ class App:
                             drop = prev[2] == 1 and lv == 0     # アクセントで下がる所は赤
                             cv.create_line(prev[0], prev[3], cx, py, width=LW + (1 if drop else 0),
                                            fill=COL_MK_ACCENT if drop else COL_PITCH, tags=("pitch",))
-                        cv.create_oval(cx - R, py - R, cx + R, py + R, fill=COL_PITCH, outline="", tags=("dot",))
+                        dtag = f"d{idx}_{k}"
+                        cv.create_oval(cx - R, py - R, cx + R, py + R, fill=COL_PITCH, outline="white",
+                                       tags=("dot", dtag))
+                        self._dot_info[dtag] = (idx, k, y + y_hi, y + y_lo, hs, lv)
                         prev = (cx, y, lv, py)
                 x += uw
             self._acc_bg(seg_x, x, y, ROW)
@@ -807,6 +820,52 @@ class App:
         cv.tag_raise("dot")
         cv.configure(scrollregion=(0, 0, W, y + ROW + sc(4)))
         cv.yview_moveto(top)
+
+    # 高低の線の点をつまんで動かす
+    def _dot_press(self, e):
+        cv = self.acc_cv
+        cur = cv.find_withtag("current")
+        tags = cv.gettags(cur[0]) if cur else ()
+        dtag = next((t for t in tags if t in self._dot_info), None)
+        if not dtag:
+            return
+        x1, y1, x2, y2 = cv.coords(cur[0])
+        self._drag = {"item": cur[0], "info": self._dot_info[dtag], "y0": cv.canvasy(e.y),
+                      "cy": (y1 + y2) / 2, "moved": False}
+
+    def _dot_motion(self, e):
+        d = self._drag
+        if not d:
+            return
+        cv = self.acc_cv
+        _, _, y_hi, y_lo, _, _ = d["info"]
+        ny = min(max(cv.canvasy(e.y), y_hi), y_lo)
+        if abs(cv.canvasy(e.y) - d["y0"]) > 3:
+            d["moved"] = True
+        x1, y1, x2, y2 = cv.coords(d["item"])
+        r = (y2 - y1) / 2
+        cv.coords(d["item"], x1, ny - r, x2, ny + r)
+
+    def _dot_release(self, e):
+        d, self._drag = self._drag, None
+        self.acc_cv.configure(cursor="")
+        if not d:
+            return
+        idx, k, y_hi, y_lo, hs, lv = d["info"]
+        if d["moved"]:
+            x1, y1, x2, y2 = self.acc_cv.coords(d["item"])
+            want_high = (y1 + y2) / 2 < (y_hi + y_lo) / 2      # 真ん中より上で離したら「高」
+        else:
+            want_high = not lv                                 # クリックだけなら高低を入れ替える
+        items = core.split_phrases(self.out_text.get("1.0", "end-1c"))
+        ph = items[idx] if idx < len(items) and isinstance(items[idx], core.Phrase) else None
+        ok, target = core.accent_for_pitch(ph, k, want_high, hs) if ph else (False, None)
+        if not ok:
+            self._draw_accent_panel()                          # 元の位置に戻す
+            if ph and bool(lv) != want_high:
+                self._refresh_status("この点は、アクセントの置き方ではその高さにできません")
+            return
+        self._set_accent(ph, target)
 
     def _acc_bg(self, x1, x2, y, row):
         """文節のまとまりを、薄い背景で示す"""

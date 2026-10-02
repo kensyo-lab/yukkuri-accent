@@ -71,3 +71,27 @@ assert shortcut_label("") == "（なし）"
 assert shortcut_variants("<Control-Shift-Key-V>") == ["<Control-Shift-Key-v>", "<Control-Shift-Key-V>"]
 assert shortcut_variants("<Key-F5>") == ["<Key-F5>"]
 print(f"ショートカット {m + 5} 件 OK")
+
+# 点を動かしたときのアクセントの置き方
+from accent_core import accent_for_pitch
+def drag(s, text, up, high_start=False):
+    p = ph(s)
+    k = [u.text for u in p.units].index(text)
+    ok, tgt = accent_for_pitch(p, k, up, high_start)
+    if not ok:
+        return "変えない"
+    return "平板" if tgt is None else p.units[tgt].text
+c = 0
+for args, want in [
+    (("ぶ'んしょうです", "しょ", True), "しょ"),     # 高低低低低低 → 低高高低低低
+    (("ぶんしょうです", "で", False), "う"),          # 平板の「で」を下げる → 直前の「う」にアクセント
+    (("えんしゅ'うりつ", "つ", True), "平板"),        # 最後を上げる → 平板
+    (("か'きくけ", "か", False), "き"),               # 頭高の1拍目を下げる → 低高低低
+    (("ぶ'んしょう", "ぶ", True), "変えない"),        # すでに高い
+    (("これわ", "こ", True), "こ"),                   # 平板の1拍目を上げる → 頭高
+    (("きゅーに", "ー", False), "きゅ"),              # ー を下げる → きゅ にアクセント（ー には置けない）
+]:
+    got = drag(*args)
+    assert got == want, (args, got, want)
+    c += 1
+print(f"点のドラッグ {c} 件 OK")

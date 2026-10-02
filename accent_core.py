@@ -917,6 +917,29 @@ def pitch_pattern(ph: Phrase, high_start: bool = False) -> list[int | None]:
     return out
 
 
+def accent_for_pitch(ph: Phrase, k: int, want_high: bool, high_start: bool = False) -> tuple[bool, int | None]:
+    """高低の線の点（k 拍目）を、高く（want_high）／低くしたいときのアクセントの置き方。
+    そうなる置き方（平板か、アクセントを置ける拍のどれか）の中から、今の線から変わる拍がいちばん少ないものを選ぶ。
+    同じなら平板 → k に近い拍の順。戻り値: (変えるか, アクセントを置く拍 or None=平板)。"""
+    now = pitch_pattern(ph, high_start)
+    if now[k] is None or now[k] == (1 if want_high else 0):
+        return False, None
+    cur = ph.accents[0] if ph.accents else None
+    best = None
+    for cand in [None] + [j for j, u in enumerate(ph.units) if u.can_accent]:
+        trial = Phrase(ph.start, ph.end, ph.units, [] if cand is None else [cand], [])
+        pat = pitch_pattern(trial, high_start)
+        if pat[k] != (1 if want_high else 0) or cand == cur:
+            continue
+        cost = sum(1 for a, b in zip(now, pat) if a is not None and a != b)
+        key = (cost, cand is not None, abs((cand if cand is not None else k) - k))
+        if best is None or key < best[0]:
+            best = (key, cand)
+    if best is None:
+        return False, None
+    return True, best[1]
+
+
 def apply_accent(s: str, ph: Phrase, k: int) -> str:
     dels, ins = accent_edits(ph, k)
     chars = list(s)
