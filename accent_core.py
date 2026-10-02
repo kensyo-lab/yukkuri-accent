@@ -1237,3 +1237,24 @@ def shortcut_variants(seq: str) -> list[str]:
         return [seq] if seq else []
     pre = m.group(1) or ""
     return [f"<{pre}Key-{m.group(2).lower()}>", f"<{pre}Key-{m.group(2).upper()}>"]
+
+
+# ── 終了するときの確認 ──────────────────────────────
+def unregistered_changes(out_now: str, out_converted: str, out_sent: str | None,
+                         cands: list[Candidate]) -> dict[str, int | bool]:
+    """閉じる前に、辞書に入っていない変更が残っていないかを調べる。
+
+    out_now       : 変換結果の欄のいまの中身
+    out_converted : 最後に［変換］したときの結果（手直しする前）
+    out_sent      : 最後に［学習タブへ送る］をしたときの中身（送っていなければ None）
+    cands         : 学習タブの候補
+
+    返り値:
+      "edited"  … 変換結果を手直ししたのに、まだ学習タブへ送っていない
+      "pending" … 学習タブで登録にチェックしたまま、まだ辞書に登録していない候補の数
+    """
+    now = normalize(out_now).strip()
+    edited = bool(now) and now != normalize(out_converted).strip() and (
+        out_sent is None or now != normalize(out_sent).strip())
+    pending = sum(1 for c in cands if c.use and c.status != "登録済み" and c.kind != "数字")
+    return {"edited": edited, "pending": pending}

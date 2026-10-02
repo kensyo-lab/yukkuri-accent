@@ -34,6 +34,9 @@ CONF_PATH = os.path.join(BASE_DIR, "settings.json")
 # 同梱ファイル（アイコンなど）の場所: .exe では展開先、スクリプトでは同じフォルダ
 RES_DIR = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
 
+# 外部プログラム（AquesTalkPlayer など）を呼ぶとき、黒いコンソール画面を出さない
+NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
 COL_APPLIED = "#fff2b3"
 COL_ERROR = "#ffb3b3"
 COL_WARN = "#ffd9a6"
@@ -146,6 +149,8 @@ class App:
         self._proc = None          # 書き出し中の AquesTalkPlayer
         self._wav = None           # いま再生している一時WAV
         self._texts = []
+        self._out_converted = ""   # 最後に［変換］した結果（手直しの有無を見るため）
+        self._out_sent = None      # 最後に学習タブへ送った変換結果
 
         nb = ttk.Notebook(root)
         nb.pack(fill="both", expand=True, padx=8, pady=(8, 0))
@@ -349,11 +354,37 @@ class App:
         acts[aid]()
 
     def on_close(self):
+        if not self._confirm_discard():
+            return
         self.stop_preview()
         self._remove_wav()
         self.save_dict()
         self._save_conf()
         self.root.destroy()
+
+    def _confirm_discard(self) -> bool:
+        """辞書に入っていない変更があれば、破棄してよいか聞く。閉じてよければ True。"""
+        st = core.unregistered_changes(self.out_text.get("1.0", "end-1c"), self._out_converted,
+                                       self._out_sent, self.cands)
+        if not st["edited"] and not st["pending"]:
+            return True
+        lines = []
+        if st["pending"]:
+            lines.append(f"・学習タブに、登録にチェックしたまま辞書に入っていない候補が {st['pending']} 件あります")
+        if st["edited"]:
+            lines.append("・変換結果の手直しを、まだ学習タブへ送っていません")
+        ok = messagebox.askyesno(
+            APP_NAME,
+            "現在の変更が辞書登録されていません。\n破棄しても宜しいですか？\n\n" + "\n".join(lines)
+            + "\n\n［いいえ］を押すと、終了せずに元の画面へ戻ります。",
+            icon="warning", default="no", parent=self.root)
+        if not ok:
+            # 残っている所を開いておく（学習タブの候補を優先）
+            self.nb.select(1 if st["pending"] else 0)
+            self._refresh_status([("終了をやめました。", None),
+                                  ("学習タブで［チェックしたものを辞書に登録］を押すと、辞書に入ります" if st["pending"]
+                                   else "［この手直しを学習タブへ送る →］から辞書に登録できます", "warn")])
+        return ok
 
     def save_dict(self):
         try:
@@ -563,6 +594,7 @@ class App:
         res = core.convert(raw, self.dic, self.numbers)
         self.out_text.delete("1.0", "end")
         self.out_text.insert("1.0", res.text)
+        self._out_converted = res.text
         for a in res.applied:
             self.out_text.tag_add("applied", f"1.0+{a.start}c", f"1.0+{a.end}c")
         self._show_issues(res.issues)
@@ -638,6 +670,7 @@ class App:
         self.l_before.insert("1.0", self.in_text.get("1.0", "end-1c"))
         self.l_after.delete("1.0", "end")
         self.l_after.insert("1.0", self.out_text.get("1.0", "end-1c"))
+        self._out_sent = self.out_text.get("1.0", "end-1c")
         self.nb.select(1)
         self.do_learn()
 
@@ -1029,7 +1062,8 @@ class App:
             return
         try:
             subprocess.Popen([exe], cwd=os.path.dirname(exe), stdin=subprocess.DEVNULL,
-                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                             creationflags=NO_WINDOW)
             self._refresh_status([("AquesTalkPlayer を開きました。", None),
                                   ("最初からある「まりさ」「れいむ」は変更しても元に戻るので、［Add］で自分用のプリセットを作ってください", "warn")])
         except OSError as ex:
@@ -1067,7 +1101,7 @@ class App:
         try:
             # --windowed の .exe では標準入出力が無いので、明示的に捨て先を渡す
             proc = subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                                    stderr=subprocess.DEVNULL)
+                                    stderr=subprocess.DEVNULL, creationflags=NO_WINDOW)
             self._proc = proc
             try:
                 code = proc.wait(timeout=PLAYER_TIMEOUT)
