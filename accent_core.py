@@ -1258,3 +1258,49 @@ def unregistered_changes(out_now: str, out_converted: str, out_sent: str | None,
         out_sent is None or now != normalize(out_sent).strip())
     pending = sum(1 for c in cands if c.use and c.status != "登録済み" and c.kind != "数字")
     return {"edited": edited, "pending": pending}
+
+
+# ─────────────────────────────────────────────
+# 置き場所の確認（起動時）
+# ─────────────────────────────────────────────
+# 同期フォルダの見分け方（フォルダ名の小文字）
+SYNC_FOLDERS = {"dropbox": "Dropbox", "google drive": "Google ドライブ", "googledrive": "Google ドライブ",
+                "マイドライブ": "Google ドライブ", "my drive": "Google ドライブ",
+                "icloud drive": "iCloud Drive", "iclouddrive": "iCloud Drive"}
+
+
+def _norm_path(p: str) -> str:
+    return (p or "").replace("\\", "/").rstrip("/").lower()
+
+
+def _under(path: str, parent: str) -> bool:
+    parent = _norm_path(parent)
+    return bool(parent) and (path == parent or path.startswith(parent + "/"))
+
+
+def check_location(base_dir: str, env: dict | None = None, temp_dir: str = "",
+                   writable: bool = True) -> list[tuple[str, str]]:
+    """このツールが置かれている場所の困りごとを返す: [(大事さ, 内容)]。大事さは "crit" / "warn"。
+    - crit: 一時フォルダ（ZIP を展開せずに開いた）・書き込めない … 辞書や設定が消える／保存されない
+    - warn: OneDrive などの同期フォルダ・Program Files … 動きが食い違うことがある"""
+    env = env or {}
+    path = _norm_path(base_dir)
+    parts = path.split("/")
+    out: list[tuple[str, str]] = []
+    in_temp = (temp_dir and _under(path, temp_dir)) or any(re.fullmatch(r"temp\d+_.*\.zip", x) for x in parts)
+    if in_temp:
+        out.append(("crit", "zip"))
+    if not writable:
+        out.append(("crit", "readonly"))
+    if any(_under(path, env.get(k, "")) for k in ("ProgramFiles", "ProgramFiles(x86)", "ProgramW6432")) \
+            or any(x in ("program files", "program files (x86)") for x in parts):
+        out.append(("warn", "programfiles"))
+    sync = None
+    if any(_under(path, env.get(k, "")) for k in ("OneDrive", "OneDriveConsumer", "OneDriveCommercial")) \
+            or any(x == "onedrive" or x.startswith("onedrive - ") for x in parts):
+        sync = "OneDrive"
+    else:
+        sync = next((SYNC_FOLDERS[x] for x in parts if x in SYNC_FOLDERS), None)
+    if sync:
+        out.append(("warn", "sync:" + sync))
+    return out

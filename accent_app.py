@@ -22,7 +22,7 @@ from tkinter import ttk, messagebox, filedialog
 import accent_core as core
 
 APP_NAME = "ゆっくりアクセント辞書"
-VERSION = "0.5.1"
+VERSION = "0.5.2"
 
 if getattr(sys, "frozen", False):
     BASE_DIR = os.path.dirname(sys.executable)
@@ -138,6 +138,7 @@ class App:
         self.numbers = core.load_numbers(NUM_PATH)
         self.dic, broken = self._load_dict()
         self.pitch_line = tk.BooleanVar(value=self.conf.get("pitch_line", True))
+        self.check_place = tk.BooleanVar(value=self.conf.get("check_location", True))
         self.shortcuts = {k: v for k, v in (self.conf.get("shortcuts") or {}).items()}
         self._bound = []
         self._hint_buttons = []      # (操作, ボタン, 文字) … ボタンにショートカットを書き添える
@@ -162,10 +163,13 @@ class App:
 
         self._build_message_bar(nb)
         self._bind_shortcuts()
+        place = self._location_message()
         if broken:
             self._refresh_status([("辞書ファイルが壊れていて読み込めませんでした。", "crit"),
                                   (f"\n元のファイルは {os.path.basename(broken)} に名前を変えて残してあります。"
                                    "辞書タブの［バックアップから戻す…］で、前の状態に戻せます。", None)])
+        elif place:
+            self._refresh_status(place)
         else:
             self._refresh_status(f"YMM4 でセリフの読みをコピーして［貼り付けて変換］（{self._key_label('paste_convert')}）を押すと、"
                                  "変換した結果がクリップボードに入ります。そのまま YMM4 に貼り付けてください。")
@@ -215,6 +219,7 @@ class App:
         self.conf["voice_presets"] = self._used_voices[:20]
         self.conf["ui_scale"] = self.scale
         self.conf["pitch_line"] = bool(self.pitch_line.get())
+        self.conf["check_location"] = bool(self.check_place.get())
         self.conf["shortcuts"] = self.shortcuts
         try:
             with open(CONF_PATH, "w", encoding="utf-8") as f:
@@ -244,6 +249,39 @@ class App:
             return core.backup_file(DICT_PATH, BACKUP_DIR, keep=BACKUP_KEEP)
         except OSError:
             return None
+
+    # ── 置き場所の確認（起動時） ───────────────────
+    def _location_message(self):
+        """ZIP の中・書き込めない・同期フォルダ・Program Files で動いていたら、知らせる文を返す（なければ None）"""
+        try:
+            with tempfile.NamedTemporaryFile(dir=BASE_DIR, prefix=".write_test_"):
+                writable = True
+        except OSError:
+            writable = False
+        found = core.check_location(BASE_DIR, dict(os.environ), tempfile.gettempdir(), writable)
+        if not self.check_place.get():
+            found = [f for f in found if f[0] == "crit"]       # 赤（消える・保存されない）は止めても知らせる
+        if not found:
+            return None
+        level, kind = found[0]
+        home = os.environ.get("USERPROFILE") or os.path.expanduser("~")
+        good = os.path.join(home, "yukkuri-accent")
+        if kind == "zip":
+            head = "ZIP を展開しないまま開いているようです（一時フォルダで動いています）。"
+            body = ("このままだと、閉じたときに辞書や設定が消えます。ZIP を右クリック →［すべて展開］して、"
+                    "展開したフォルダの yukkuri-accent.exe を起動してください。")
+        elif kind == "readonly":
+            head = "このフォルダには書き込めないため、辞書や設定が保存されません。"
+            body = f"書き込めるフォルダ（例：{good}）に、フォルダごと移してください。"
+        elif kind == "programfiles":
+            head = "「Program Files」の中で動いています。"
+            body = f"辞書や設定が保存されないことがあります。{good} などに、フォルダごと移すのがおすすめです。"
+        else:
+            head = f"{kind.split(':', 1)[1]} の同期フォルダの中で動いています。"
+            body = (f"古い設定が残ったり、別の場所のファイルと入れ替わったりすることがあります。"
+                    f"{good} など同期されない場所に、フォルダごと移すのがおすすめです。")
+        tail = "（この確認は設定タブで止められます）" if level == "warn" else ""
+        return [(head, level), ("\n" + body + tail, None)]
 
     # ── 文字の大きさ ──────────────────────────────
     @staticmethod
@@ -1532,6 +1570,10 @@ class App:
         ttk.Label(tab, text=f"{round(SCALE_MIN * 100)}%〜{round(SCALE_MAX * 100)}% の間で、10% ずつ変えられます。"
                             "Ctrl＋マウスホイールや、下のショートカットでも変えられます。ウィンドウも同じ割合で大きくなります。",
                   foreground="#444").pack(anchor="w")
+
+        ttk.Checkbutton(tab, text="起動時に、置き場所（OneDrive などの同期フォルダ・Program Files）を確かめて知らせる"
+                                  "（ZIP の中から開いたときと、書き込めないときは、常に知らせます）",
+                        variable=self.check_place, command=self._save_conf).pack(anchor="w", pady=(8, 0))
 
         # ショートカット
         ttk.Separator(tab).pack(fill="x", pady=10)

@@ -52,6 +52,7 @@ jobs:
           python tests/test_presets.py
           python tests/test_pitch_backup.py
           python tests/test_close_check.py
+          python tests/test_location.py
           python tests/check_numbers.py > /dev/null
 
       - name: アイコンを用意する

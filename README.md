@@ -12,7 +12,7 @@ YMM4に貼る前に耳で確かめられるので、「直す → 聞く → ま
 
 ### かんたんな方法（Windows・Pythonは不要）
 1. [最新のリリース](https://github.com/kensyo-lab/yukkuri-accent/releases/latest)を開き、下の **Assets** にある `yukkuri-accent-vX.X-windows.zip` をダウンロードします（「Source code」の方には .exe が入っていません。また、このページ上部の緑の「Code」ボタンから落とせるのもソースコードです）
-2. 好きなフォルダに展開します（例: `C:\Users\（ユーザー名）\yukkuri-accent`）。「Program Files」の中や、OneDrive などの同期フォルダは避けてください。OneDrive のバックアップがオンだと「デスクトップ」「ドキュメント」も OneDrive の中になります
+2. 好きなフォルダに展開します（例: `C:\Users\（ユーザー名）\yukkuri-accent`）。「Program Files」の中や、OneDrive などの同期フォルダは避けてください。OneDrive のバックアップがオンだと「デスクトップ」「ドキュメント」も OneDrive の中になります（こうした場所で起動すると、メッセージ欄で知らせます）
 3. `yukkuri-accent.exe` をダブルクリックして起動します
 
 初回起動時に、同じフォルダに `accent_dict.json`（空の辞書）と `numbers.json`（数字の読み表）が作られます。
