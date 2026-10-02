@@ -42,6 +42,10 @@
 展開したフォルダの `yukkuri-accent.exe` を差し替えるだけです。
 `accent_dict.json`（辞書）・`numbers.json`（数字の読み表）・`settings.json`（設定）はそのまま引き継げます。
 
+### Q. ソースコードを展開したら、名前が文字化けしたファイルがあります
+v0.5 より前の版では、ダブルクリックで起動するファイルの名前が日本語（`ゆっくりアクセント辞書.pyw`）でした。Windows の ZIP 展開では、この名前が `繧・▲縺上ｊ…pyw` のように化けることがあります。中身は同じなので、そのままダブルクリックして使えます。
+v0.5 からは `yukkuri-accent.pyw` という英字の名前にしたので、化けません。
+
 ### Q. Mac や Linux でも使えますか？
 Python 3.8以降（tkinter付き）があれば、`python accent_app.py` で変換・学習・辞書・アクセント編集は使えます。
 **試聴だけは Windows 専用**です（AquesTalkPlayer が Windows 用のソフトのため）。

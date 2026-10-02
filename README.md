@@ -25,7 +25,7 @@ YMM4に貼る前に耳で確かめられるので、「直す → 聞く → ま
 
 ### Pythonで動かす方法
 Python 3.8以降（tkinter付き）が入っていれば、追加のインストールは要りません。
-`ゆっくりアクセント辞書.pyw` をダブルクリックすると、コンソール画面を出さずに起動します。コマンドで起動する場合は次のとおりです。
+`yukkuri-accent.pyw` をダブルクリックすると、コンソール画面を出さずに起動します。コマンドで起動する場合は次のとおりです。
 
 ```
 python accent_app.py
@@ -153,7 +153,7 @@ YMM4側のクセもいくつか後始末します。
 | `accent_core.py` | 変換・学習・検査のロジック（GUIなしでも使えます） |
 | `accent_app.py` | 画面（tkinter） |
 | `dictionaries/kensyo.json` | 作者（けんしょう）の辞書。参考に取り込めます |
-| `ゆっくりアクセント辞書.pyw` | Pythonでダブルクリック起動するためのファイル |
+| `yukkuri-accent.pyw` | Pythonでダブルクリック起動するためのファイル |
 | `assets/icon.png` | アプリのアイコン |
 | `tools/make_icon.py` | アイコンPNGから .ico を作る道具（ビルド時に自動で使われます） |
 | `.github/workflows/release.yml` | `v` で始まるタグを付けると、Windows版を自動で作って Releases に置く設定 |
