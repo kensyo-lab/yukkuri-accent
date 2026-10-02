@@ -42,3 +42,18 @@ assert preview_text(None, "") == ("", False)
 assert preview_text("。", "、。") == ("", False)                # 全体にも仮名がなければ空
 assert preview_text(None, "<NUMK VAL=3>") == ("", False)        # タグだけも読めない
 print(f"試聴で読む所 {m + 3} 件 OK")
+
+# 他の辞書を取り込んでも、作者の使用回数・登録日は持ち込まない
+import datetime as _dt
+from accent_core import Dictionary
+src = Dictionary(); src.upsert("てすと", "て'すと"); src.entries[0].hits, src.entries[0].added = 5, "2020-01-01"
+mine = Dictionary()
+assert mine.merge(src) == (1, 0)
+e = mine.entries[0]
+assert (e.hits, e.added) == (0, _dt.date.today().isoformat()), (e.hits, e.added)
+assert (src.entries[0].hits, src.entries[0].added) == (5, "2020-01-01")   # 取り込み元は書き換えない
+# 同梱のサンプル辞書にも、使用回数・登録日は入れない
+import json
+sample = json.load(open(os.path.join(os.path.dirname(__file__), "..", "dictionaries", "kensyo.json"), encoding="utf-8"))
+assert not any("hits" in x or "added" in x for x in sample["entries"])
+print("辞書の取り込み 2 件 OK")

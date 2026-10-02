@@ -637,13 +637,17 @@ class Dictionary:
         self._index = None
 
     def merge(self, other: "Dictionary") -> tuple[int, int]:
-        """他の辞書を取り込む。自分の既存項目は優先（上書きしない）。"""
+        """他の辞書を取り込む。自分の既存項目は優先（上書きしない）。
+        使用回数は持ち込まず 0 から数え、登録日は取り込んだ日にする（元の辞書の作者の利用記録を混ぜない）。"""
         added = skipped = 0
+        today = _dt.date.today().isoformat()
         for e in other.entries:
             if self.find(e.src):
                 skipped += 1
             else:
-                self.entries.append(copy.copy(e))
+                ne = copy.copy(e)
+                ne.hits, ne.added = 0, today
+                self.entries.append(ne)
                 added += 1
         self._index = None
         return added, skipped
