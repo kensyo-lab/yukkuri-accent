@@ -7,8 +7,10 @@
 """
 from __future__ import annotations
 
+import datetime
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -20,7 +22,7 @@ from tkinter import ttk, messagebox, filedialog
 import accent_core as core
 
 APP_NAME = "ゆっくりアクセント辞書"
-VERSION = "0.4"
+VERSION = "0.5"
 
 if getattr(sys, "frozen", False):
     BASE_DIR = os.path.dirname(sys.executable)
@@ -49,7 +51,41 @@ MSG_STYLE = {
     "crit": {"bg": "#ffecec", "bar": "#d0342c", "fg": "#c0201a"},
 }
 MSG_LINES = 3                  # メッセージ欄は最初から3行分の高さを取っておく
-WIN_W, WIN_H = 1040, 780       # 起動時のウィンドウの大きさ
+WIN_W, WIN_H = 1040, 780       # 起動時のウィンドウの大きさ（文字の大きさ 100% のとき）
+SCALE_MIN, SCALE_MAX = 0.8, 2.0  # 文字の大きさの範囲（80%〜200%）
+BACKUP_DIR = os.path.join(BASE_DIR, "backup")
+BACKUP_KEEP = 20
+ACC_CANVAS_H = 200             # アクセント編集の欄の高さ（100% のとき）
+COL_PITCH = "#5b7db1"          # 高低の線
+
+# 文字の大きさ（100% のときのポイント数）。設定の倍率を掛けて使う。名前: (書体, 大きさ, 太さ)
+FONT_BASE = {
+    "text": ("text", 14, "normal"), "text_b": ("text", 14, "bold"),
+    "entry": ("entry", 13, "normal"), "entry_b": ("entry", 14, "bold"),
+    "ui": ("text", 10, "normal"), "ui_b": ("text", 10, "bold"), "small": ("text", 9, "normal"),
+    "tree": ("text", 11, "normal"), "head": ("text", 10, "bold"),
+    "big": ("text", 11, "bold"), "title": ("text", 11, "bold"),
+    "acc": ("text", 14, "normal"), "acc_b": ("text", 14, "bold"), "acc_s": ("text", 10, "normal"),
+}
+
+# ショートカット（操作の名前, 画面に出す名前, 最初のキー）。設定タブで変えられ、settings.json に保存する
+SHORTCUTS = [
+    ("paste_convert", "貼り付けて変換", "<Control-Shift-Key-V>"),
+    ("convert", "変換", "<Control-Key-Return>"),
+    ("copy", "コピー", "<Control-Shift-Key-C>"),
+    ("recheck", "再チェック", "<Key-F7>"),
+    ("preview", "試聴", "<Key-F5>"),
+    ("stop", "試聴を止める", "<Key-F6>"),
+    ("accent_panel", "アクセント編集を開く／閉じる", "<Key-F8>"),
+    ("acc_left", "アクセントを前の文字へ（カーソルのある文節）", "<Alt-Key-Left>"),
+    ("acc_right", "アクセントを後ろの文字へ（カーソルのある文節）", "<Alt-Key-Right>"),
+    ("acc_here", "カーソルの前の文字にアクセント", "<Alt-Key-Up>"),
+    ("acc_clear", "アクセントを外す（平板）", "<Alt-Key-Down>"),
+    ("send_learn", "手直しを学習タブへ送る", ""),
+    ("font_up", "文字を大きく", "<Control-Key-plus>"),
+    ("font_down", "文字を小さく", "<Control-Key-minus>"),
+    ("font_reset", "文字の大きさを100%に戻す", "<Control-Key-0>"),
+]
 
 IS_WINDOWS = sys.platform.startswith("win")
 DEFAULT_PRESETS = ("まりさ", "れいむ")
@@ -74,8 +110,11 @@ class App:
     def __init__(self, root: tk.Tk):
         self.root = root
         root.title(f"{APP_NAME} v{VERSION}")
-        root.geometry(f"{WIN_W}x{WIN_H}")
-        root.minsize(820, 600)
+        self.conf = self._load_conf()
+        self.scale = self._clamp_scale(self.conf.get("ui_scale", 1.0))
+        w, h = self._start_size()
+        root.geometry(f"{w}x{h}")
+        root.minsize(*self._min_size())
         icon = os.path.join(RES_DIR, "assets", "icon.png")
         if os.path.exists(icon):
             try:
@@ -84,20 +123,21 @@ class App:
             except tk.TclError:
                 pass
 
-        fam = pick_font(root)
-        self.f_text = (fam, 14)
-        self.f_entry = (pick_font(root, ENTRY_FONTS), 13)
-        self.f_ui = (fam, 10)
-        style = ttk.Style(root)
-        style.configure(".", font=self.f_ui)
-        style.configure("Treeview", font=(fam, 11), rowheight=26)
-        style.configure("Treeview.Heading", font=(fam, 10, "bold"))
-        style.configure("Big.TButton", font=(fam, 11, "bold"), padding=(12, 6))
+        # 書体は「名前つきフォント」にしておき、文字の大きさを変えると画面全体がいっしょに変わるようにする
+        fams = {"text": pick_font(root), "entry": pick_font(root, ENTRY_FONTS)}
+        self.fonts = {n: tkfont.Font(root=root, family=fams[k], size=self._fsize(sz), weight=wt)
+                      for n, (k, sz, wt) in FONT_BASE.items()}
+        self.f_text, self.f_entry, self.f_ui = self.fonts["text"], self.fonts["entry"], self.fonts["ui"]
+        self.style = ttk.Style(root)
+        self._apply_style()
 
         self._ensure_numbers_file()
         self.numbers = core.load_numbers(NUM_PATH)
-        self.dic = core.Dictionary.load(DICT_PATH)
-        self.conf = self._load_conf()
+        self.dic, broken = self._load_dict()
+        self.pitch_line = tk.BooleanVar(value=self.conf.get("pitch_line", True))
+        self.shortcuts = {k: v for k, v in (self.conf.get("shortcuts") or {}).items()}
+        self._bound = []
+        self._hint_buttons = []      # (操作, ボタン, 文字) … ボタンにショートカットを書き添える
 
         self.color_marks = tk.BooleanVar(value=self.conf.get("color_marks", True))
         self.player_path = tk.StringVar(value=self.conf.get("aquestalk_player", ""))
@@ -116,16 +156,19 @@ class App:
         self._build_settings(nb)
 
         self._build_message_bar(nb)
-        self._refresh_status("YMM4 でセリフの読みをコピーして［貼り付けて変換］（Ctrl+Shift+V）を押すと、"
-                             "変換した結果がクリップボードに入ります。そのまま YMM4 に貼り付けてください。")
+        self._bind_shortcuts()
+        if broken:
+            self._refresh_status([("辞書ファイルが壊れていて読み込めませんでした。", "crit"),
+                                  (f"\n元のファイルは {os.path.basename(broken)} に名前を変えて残してあります。"
+                                   "辞書タブの［バックアップから戻す…］で、前の状態に戻せます。", None)])
+        else:
+            self._refresh_status(f"YMM4 でセリフの読みをコピーして［貼り付けて変換］（{self._key_label('paste_convert')}）を押すと、"
+                                 "変換した結果がクリップボードに入ります。そのまま YMM4 に貼り付けてください。")
 
-        for w in (self.in_text, self.out_text):
-            w.bind("<Control-Return>", lambda e: self.do_convert())
-        root.bind("<Control-Return>", lambda e: self.do_convert())
-        for k in ("<Control-Shift-V>", "<Control-Shift-v>"):
-            root.bind_all(k, lambda e: (self.paste_and_convert(), "break")[1])
-        for k in ("<Control-Shift-C>", "<Control-Shift-c>"):
-            root.bind_all(k, lambda e: (self.copy_output(), "break")[1])
+        # Ctrl＋マウスホイールで文字の大きさを変える
+        root.bind_all("<Control-MouseWheel>", lambda e: (self.set_scale(self.scale + (0.1 if e.delta > 0 else -0.1)), "break")[1])
+        root.bind_all("<Control-Button-4>", lambda e: (self.set_scale(self.scale + 0.1), "break")[1])
+        root.bind_all("<Control-Button-5>", lambda e: (self.set_scale(self.scale - 0.1), "break")[1])
         root.protocol("WM_DELETE_WINDOW", self.on_close)
         if self.conf.get("accent_panel"):
             self._open_panel_at_start()
@@ -165,11 +208,145 @@ class App:
         self.conf["aquestalk_player"] = self.player_path.get().strip()
         self.conf["voice_preset"] = self.voice.get().strip()
         self.conf["voice_presets"] = self._used_voices[:20]
+        self.conf["ui_scale"] = self.scale
+        self.conf["pitch_line"] = bool(self.pitch_line.get())
+        self.conf["shortcuts"] = self.shortcuts
         try:
             with open(CONF_PATH, "w", encoding="utf-8") as f:
                 json.dump(self.conf, f, ensure_ascii=False, indent=1)
         except Exception:
             pass
+
+    # ── 辞書の読み込みとバックアップ ──────────────
+    def _load_dict(self):
+        """辞書を読む。壊れていたら名前を変えて残し、空の辞書で始める（起動できないのを防ぐ）。
+        戻り値: (辞書, 壊れていたファイルの退避先 or None)"""
+        try:
+            dic = core.Dictionary.load(DICT_PATH)
+        except Exception:
+            stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+            dst = os.path.join(BASE_DIR, f"accent_dict_broken_{stamp}.json")
+            try:
+                os.replace(DICT_PATH, dst)
+            except OSError:
+                dst = DICT_PATH
+            return core.Dictionary(), dst
+        self._backup_dict()          # 起動時に1つ写しておく（前回と同じなら写さない）
+        return dic, None
+
+    def _backup_dict(self):
+        try:
+            return core.backup_file(DICT_PATH, BACKUP_DIR, keep=BACKUP_KEEP)
+        except OSError:
+            return None
+
+    # ── 文字の大きさ ──────────────────────────────
+    @staticmethod
+    def _clamp_scale(v):
+        try:
+            v = float(v)
+        except (TypeError, ValueError):
+            v = 1.0
+        return round(min(max(v, SCALE_MIN), SCALE_MAX), 1)
+
+    def _fsize(self, base):
+        return max(6, round(base * self.scale))
+
+    def _sc(self, v):
+        """100% のときの長さ（ピクセル）を、今の文字の大きさに合わせる"""
+        return round(v * self.scale)
+
+    def _start_size(self):
+        sw, sh = self.root.winfo_screenwidth(), self.root.winfo_screenheight()
+        return min(self._sc(WIN_W), sw - 40), min(self._sc(WIN_H), sh - 80)
+
+    def _min_size(self):
+        return min(self._sc(820), self.root.winfo_screenwidth() - 40), min(self._sc(600), self.root.winfo_screenheight() - 80)
+
+    def _apply_style(self):
+        st = self.style
+        st.configure(".", font=self.fonts["ui"])
+        st.configure("Treeview", font=self.fonts["tree"], rowheight=self._sc(26))
+        st.configure("Treeview.Heading", font=self.fonts["head"])
+        st.configure("Big.TButton", font=self.fonts["big"], padding=(self._sc(12), self._sc(6)))
+
+    def set_scale(self, v):
+        """文字の大きさを変える（80%〜200%）。ウィンドウも同じ割合で大きく／小さくする"""
+        new = self._clamp_scale(v)
+        if new == self.scale:
+            return
+        ratio = new / self.scale
+        self.scale = new
+        for n, (_, sz, _) in FONT_BASE.items():
+            self.fonts[n].configure(size=self._fsize(sz))
+        self._apply_style()
+        if hasattr(self, "acc_cv"):
+            self.acc_cv.configure(height=self._sc(ACC_CANVAS_H))
+        root = self.root
+        root.minsize(*self._min_size())
+        root.update_idletasks()
+        if root.state() == "normal" and root.winfo_ismapped():
+            w, h = root.winfo_width(), root.winfo_height()
+            nw = min(max(round(w * ratio), self._min_size()[0]), root.winfo_screenwidth() - 40)
+            nh = min(max(round(h * ratio), self._min_size()[1]), root.winfo_screenheight() - 80)
+            self._acc_added = round(self._acc_added * ratio)
+            root.geometry(f"{nw}x{nh}")
+        if hasattr(self, "scale_var"):
+            self.scale_var.set(round(new * 100))
+        self._draw_accent_panel()
+        self._save_conf()
+        self._refresh_status(f"文字の大きさ：{round(new * 100)}%")
+
+    # ── ショートカット ────────────────────────────
+    def _key(self, aid):
+        default = next(d for a, _, d in SHORTCUTS if a == aid)
+        return self.shortcuts.get(aid, default)
+
+    def _key_label(self, aid):
+        return core.shortcut_label(self._key(aid))
+
+    def _bind_shortcuts(self):
+        """割り当てたキーを結び直す。入力欄にも直接結んで、入力欄の既定の動き（改行など）より先に効かせる"""
+        for seq in self._bound:
+            self.root.unbind_all(seq)
+            for w in self._texts:
+                w.unbind(seq)
+        self._bound = []
+        for aid, _, _ in SHORTCUTS:
+            for seq in core.shortcut_variants(self._key(aid)):
+                h = (lambda e, a=aid: (self._run_action(a), "break")[1])
+                self.root.bind_all(seq, h)
+                for w in self._texts:
+                    w.bind(seq, h)
+                self._bound.append(seq)
+        for aid, btn, text in self._hint_buttons:
+            key = self._key(aid)
+            btn.configure(text=f"{text}（{core.shortcut_label(key)}）" if key else text)
+        if hasattr(self, "btn_acc"):
+            self.btn_acc.configure(text=self._acc_btn_text())
+        if hasattr(self, "keys_tv"):
+            self._fill_keys()
+
+    def _hint(self, aid, btn, text):
+        """ボタンにショートカットを書き添える（キーを変えると書き直す）"""
+        self._hint_buttons.append((aid, btn, text))
+        key = self._key(aid)
+        btn.configure(text=f"{text}（{core.shortcut_label(key)}）" if key else text)
+        return btn
+
+    def _run_action(self, aid):
+        acts = {
+            "paste_convert": self.paste_and_convert, "convert": self.do_convert, "copy": self.copy_output,
+            "recheck": self.recheck, "preview": self.preview, "stop": self.stop_preview,
+            "accent_panel": self.toggle_accent_panel,
+            "acc_left": lambda: self.move_accent(-1), "acc_right": lambda: self.move_accent(1),
+            "acc_here": self.accent_at_cursor, "acc_clear": self.clear_accent,
+            "send_learn": self.send_to_learn,
+            "font_up": lambda: self.set_scale(self.scale + 0.1),
+            "font_down": lambda: self.set_scale(self.scale - 0.1),
+            "font_reset": lambda: self.set_scale(1.0),
+        }
+        acts[aid]()
 
     def on_close(self):
         self.stop_preview()
@@ -192,11 +369,10 @@ class App:
         box.pack(fill="x", side="bottom", before=nb, padx=8, pady=(6, 8))   # ノートより先に場所を取る
         bar = tk.Frame(box, width=6, bg=st["bar"])
         bar.pack(side="left", fill="y")
-        fam = self.f_ui[0]
         self.dict_info = tk.StringVar()
-        lab = tk.Label(box, textvariable=self.dict_info, font=(fam, 9), fg="#666", bg=st["bg"], anchor="ne")
+        lab = tk.Label(box, textvariable=self.dict_info, font=self.fonts["small"], fg="#666", bg=st["bg"], anchor="ne")
         lab.pack(side="right", anchor="n", padx=8, pady=5)      # 右端に先に置く（メッセージに押し出されないように）
-        t = tk.Text(box, height=MSG_LINES, width=1, wrap="char", font=(fam, 10, "bold"), relief="flat", bd=0,
+        t = tk.Text(box, height=MSG_LINES, width=1, wrap="char", font=self.fonts["ui_b"], relief="flat", bd=0,
                     padx=10, pady=5, bg=st["bg"], fg=st["fg"], cursor="arrow", takefocus=0,
                     highlightthickness=0, spacing1=1, spacing3=1)
         t.pack(side="left", fill="x", expand=True)
@@ -246,11 +422,9 @@ class App:
         sb.pack(side="right", fill="y")
         # 記号の色分け。BIZ UDゴシックの「_」は線が細すぎて消えかけて見えるので、
         # 線の太いフォントの太字で描く
-        fam = self.f_entry[0]
-        size = self.f_text[1]
-        t.tag_configure("mk_acc", foreground=COL_MK_ACCENT, font=(self.f_text[0], size, "bold"))
+        t.tag_configure("mk_acc", foreground=COL_MK_ACCENT, font=self.fonts["text_b"])
         t.tag_configure("mk_sep", foreground=COL_MK_SEP)
-        t.tag_configure("mk_dv", foreground=COL_MK_DEVOICE, font=(fam, size, "bold"))
+        t.tag_configure("mk_dv", foreground=COL_MK_DEVOICE, font=self.fonts["entry_b"])
         t.bind("<<Modified>>", lambda e, w=t: self._on_modified(w))
         self._texts.append(t)
         return frm, t
@@ -307,18 +481,18 @@ class App:
         top.pack(fill="x")
         ttk.Label(top, text="① YMM4の読み（初期状態）を貼り付け").pack(side="left")
         ttk.Button(top, text="クリア", command=lambda: self.in_text.delete("1.0", "end")).pack(side="right")
-        ttk.Button(top, text="貼り付けて変換（Ctrl+Shift+V）", command=self.paste_and_convert).pack(side="right", padx=6)
+        self._hint("paste_convert", ttk.Button(top, command=self.paste_and_convert), "貼り付けて変換").pack(side="right", padx=6)
         frm, self.in_text = self._text(tab, 5)
         frm.pack(fill="both", expand=True, pady=(4, 8))
 
         mid = ttk.Frame(tab)
         mid.pack(fill="x")
-        ttk.Button(mid, text="変換 ▼（Ctrl+Enter）", style="Big.TButton", command=self.do_convert).pack(side="left")
+        self._hint("convert", ttk.Button(mid, style="Big.TButton", command=self.do_convert), "変換 ▼").pack(side="left")
         self.auto_copy = tk.BooleanVar(value=self.conf.get("auto_copy", True))
         ttk.Checkbutton(mid, text="変換したら自動でコピー", variable=self.auto_copy).pack(side="left", padx=12)
         ttk.Checkbutton(mid, text="記号を色分け", variable=self.color_marks,
                         command=self._repaint_all).pack(side="left")
-        self.btn_acc = ttk.Button(mid, text="アクセント編集 ▼", command=self.toggle_accent_panel)
+        self.btn_acc = ttk.Button(mid, command=self.toggle_accent_panel)
         self.btn_acc.pack(side="right")
         self._build_accent_panel(tab, mid)
 
@@ -337,15 +511,16 @@ class App:
 
         bot = ttk.Frame(tab)
         bot.pack(fill="x")
-        ttk.Button(bot, text="コピー（Ctrl+Shift+C）", style="Big.TButton", command=self.copy_output).pack(side="left")
-        ttk.Button(bot, text="再チェック", command=self.recheck).pack(side="left", padx=6)
+        self._hint("copy", ttk.Button(bot, style="Big.TButton", command=self.copy_output), "コピー").pack(side="left")
+        self._hint("recheck", ttk.Button(bot, command=self.recheck), "再チェック").pack(side="left", padx=6)
         ttk.Button(bot, text="この手直しを学習タブへ送る →", command=self.send_to_learn).pack(side="right")
 
         pv = ttk.Frame(tab)
         pv.pack(fill="x", pady=(8, 0))
-        self.btn_play = ttk.Button(pv, text="▶ 試聴", command=self.preview)
+        # よく使うので、コピーと同じ大きなボタンにする
+        self.btn_play = self._hint("preview", ttk.Button(pv, style="Big.TButton", command=self.preview), "▶ 試聴")
         self.btn_play.pack(side="left")
-        self.btn_stop = ttk.Button(pv, text="■ 停止", command=self.stop_preview)
+        self.btn_stop = self._hint("stop", ttk.Button(pv, style="Big.TButton", command=self.stop_preview), "■ 停止")
         self.btn_stop.pack(side="left", padx=(4, 12))
         ttk.Label(pv, text="声（プリセット）:").pack(side="left")
         # 候補 = このツールで再生できた名前（新しい順）＋ AquesTalkPlayer.preset にあるプリセット
@@ -361,7 +536,7 @@ class App:
         self.btn_open_player = ttk.Button(pv, text="AquesTalkPlayer を開く", command=self.open_player)
         self.btn_open_player.pack(side="left", padx=(8, 0))
         if IS_WINDOWS:
-            hint = "選択範囲（なければ全体）を読み上げます"
+            hint = "選択した所だけ読むこともできます"
         else:
             hint = "試聴は Windows 専用です（AquesTalkPlayer が Windows 用のため）"
             for w in (self.btn_play, self.btn_stop, self.voice_box, self.btn_open_player):
@@ -472,12 +647,19 @@ class App:
         self._acc_added = 0          # 開いたときに広げたウィンドウの高さ
         self._acc_anchor = anchor
         ap = ttk.Frame(tab)
-        ttk.Label(ap, text="下の変換結果を、文節ごとに表示しています。文字の上のボタンを押すと、その文字にアクセント（'）を付けます。"
-                           "同じ文節の他のアクセントは外れ、もう一度押すと外れます（平板）。",
-                  foreground="#666", wraplength=990, justify="left").pack(anchor="w")
+        hdr = ttk.Frame(ap)
+        hdr.pack(fill="x")
+        cb = ttk.Checkbutton(hdr, text="高低の線を表示", variable=self.pitch_line,
+                             command=lambda: (self._draw_accent_panel(), self._save_conf()))
+        cb.pack(side="right", anchor="n")
+        lbl = ttk.Label(hdr, text="下の変換結果を文節ごとに表示しています。文字の上のボタンで、その文字にアクセント（'）を付け外しします"
+                                  "（1つの文節に1か所）。線は音の高さで、上が高く下が低く、赤はアクセントで下がる所です。",
+                        foreground="#666", justify="left")
+        lbl.pack(side="left", fill="x", expand=True)
+        hdr.bind("<Configure>", lambda e: lbl.configure(wraplength=max(e.width - cb.winfo_width() - 16, 200)))
         body = ttk.Frame(ap)
         body.pack(fill="x", pady=(2, 0))
-        cv = tk.Canvas(body, height=186, bg="white", highlightthickness=1, highlightbackground="#b8bec8")
+        cv = tk.Canvas(body, height=self._sc(ACC_CANVAS_H), bg="white", highlightthickness=1, highlightbackground="#b8bec8")
         sb = ttk.Scrollbar(body, command=cv.yview)
         cv.configure(yscrollcommand=sb.set)
         cv.pack(side="left", fill="x", expand=True)
@@ -487,10 +669,12 @@ class App:
         cv.bind("<Button-4>", lambda e: cv.yview_scroll(-1, "units"))
         cv.bind("<Button-5>", lambda e: cv.yview_scroll(1, "units"))
         self.acc_panel, self.acc_cv = ap, cv
-        fam = self.f_text[0]
-        self.f_acc = tkfont.Font(root=self.root, family=fam, size=14)
-        self.f_acc_b = tkfont.Font(root=self.root, family=fam, size=14, weight="bold")
-        self.f_acc_s = tkfont.Font(root=self.root, family=fam, size=10)
+        self.btn_acc.configure(text=self._acc_btn_text())
+
+    def _acc_btn_text(self):
+        key = self._key("accent_panel")
+        text = "アクセント編集 " + ("▲" if self._acc_shown else "▼")
+        return f"{text}（{core.shortcut_label(key)}）" if key else text
 
     def _open_panel_at_start(self):
         """起動時に開いておく。ウィンドウがまだ画面に出ていないので大きさは測れない（1ピクセルと返る）。
@@ -498,12 +682,12 @@ class App:
         root = self.root
         self.acc_panel.pack(fill="x", after=self._acc_anchor, pady=(8, 0))
         root.update_idletasks()
-        w, h = WIN_W, WIN_H
+        w, h = self._start_size()
         new_h = min(h + self.acc_panel.winfo_reqheight() + 8, max(h, root.winfo_screenheight() - 80))
         self._acc_added = new_h - h
         root.geometry(f"{w}x{new_h}")
         self._acc_shown = True
-        self.btn_acc.configure(text="アクセント編集 ▲")
+        self.btn_acc.configure(text=self._acc_btn_text())
 
     def toggle_accent_panel(self, show=None):
         show = (not self._acc_shown) if show is None else show
@@ -528,7 +712,7 @@ class App:
                 root.geometry(f"{w}x{max(h - self._acc_added, 200)}")
             self._acc_added = 0
         self._acc_shown = show
-        self.btn_acc.configure(text="アクセント編集 ▲" if show else "アクセント編集 ▼")
+        self.btn_acc.configure(text=self._acc_btn_text())
         self._draw_accent_panel()
 
     def _draw_accent_panel(self):
@@ -538,68 +722,96 @@ class App:
         top = cv.yview()[0]
         cv.delete("all")
         s = self.out_text.get("1.0", "end-1c")
-        W = max(cv.winfo_width(), 300) - 12
+        sc = self._sc
+        W = max(cv.winfo_width(), 300) - sc(12)
         if not s.strip():
-            cv.create_text(12, 14, anchor="nw", fill="#888", font=self.f_ui,
+            cv.create_text(sc(12), sc(14), anchor="nw", fill="#888", font=self.fonts["ui"],
                            text="変換すると、ここに文節ごとに表示されます。")
-            cv.configure(scrollregion=(0, 0, W, 60))
+            cv.configure(scrollregion=(0, 0, W, sc(60)))
             return
-        BTN, ROW, X0 = 14, 58, 10       # ボタンの大きさ・行の高さ・左端
-        x, y = X0, 8
-        ty = BTN + 20                    # ボタンの上端から文字の中心まで
+        pitch = self.pitch_line.get()
+        fa, fab, fas = self.fonts["acc"], self.fonts["acc_b"], self.fonts["acc_s"]
+        BTN, X0, MINW, PAD = sc(14), sc(10), sc(18), sc(4)
+        y_hi, y_lo = BTN + sc(10), BTN + sc(22)         # 高低の線（ボタンの上端から）
+        ty = BTN + (sc(40) if pitch else sc(20))        # 文字の中心
+        ROW = ty + sc(22)                               # 1行の高さ
+        R, LW = max(2, sc(3)), max(1, sc(2))            # 線の点の大きさ・太さ
+        x, y = X0, sc(8)
+        high_next = False                               # 「;」の次の文節は高く始まる
+
+        def disp_of(u):
+            d = u.text.lstrip("_")
+            if d.startswith("<") and len(d) > 14:
+                d = d[:13] + "…>"
+            return d
+
         for idx, it in enumerate(core.split_phrases(s)):
             if isinstance(it, core.Sep):
+                high_next = ";" in it.text
                 if it.text == "\n":
-                    x, y = X0, y + ROW + 6
+                    x, y = X0, y + ROW + sc(6)
                     continue
-                sw = self.f_acc.measure(it.text) + 6
+                sw = fa.measure(it.text) + sc(6)
                 if x + sw > W:
                     x, y = X0, y + ROW
-                cv.create_text(x + sw / 2, y + ty, text=it.text, fill=COL_MK_SEP, font=self.f_acc)
+                cv.create_text(x + sw / 2, y + ty, text=it.text, fill=COL_MK_SEP, font=fa)
                 x += sw
                 continue
+            pat = core.pitch_pattern(it, high_next) if pitch else None
+            high_next = False
             # 文節はなるべく途中で折り返さず、まるごと次の行へ送る
-            fonts = [self.f_acc_s if u.text.startswith("<") else self.f_acc_b for u in it.units]
-            total = sum(max(f.measure(u.text.lstrip("_")[:14]), 18) + 4 for f, u in zip(fonts, it.units))
+            fonts = [fas if u.text.startswith("<") else fab for u in it.units]
+            total = sum(max(f.measure(disp_of(u)), MINW) + PAD for f, u in zip(fonts, it.units))
             if x > X0 and x + total > W and total <= W - X0:
                 x, y = X0, y + ROW
             seg_x = x
+            prev = None                                 # 直前の拍の点 (x, 行のy, 高低, 点のy)
             for k, u in enumerate(it.units):
                 accented = k in it.accents
-                disp = u.text.lstrip("_")
-                if disp.startswith("<"):
-                    disp = disp if len(disp) <= 14 else disp[:13] + "…>"
-                    font = self.f_acc_s
-                else:
-                    font = self.f_acc_b if accented else self.f_acc
-                uw = max(font.measure(disp), 18) + 4
+                disp = disp_of(u)
+                font = fas if disp.startswith("<") else (fab if accented else fa)
+                uw = max(font.measure(disp), MINW) + PAD
                 if x + uw > W and x > seg_x:
                     self._acc_bg(seg_x, x, y, ROW)
                     x = seg_x = X0
                     y += ROW
+                    prev = None
                 cx = x + uw / 2
                 color = (COL_MK_ACCENT if accented else COL_MK_DEVOICE if u.devoiced
                          else "#222" if u.can_accent else "#8a8f98")
                 tag = f"u{idx}_{k}"
                 cv.create_text(cx, y + ty, text=disp, fill=color, font=font, tags=(tag,))
                 if u.can_accent:
-                    cv.create_rectangle(cx - BTN / 2, y + 4, cx + BTN / 2, y + 4 + BTN,
+                    cv.create_rectangle(cx - BTN / 2, y + sc(4), cx + BTN / 2, y + sc(4) + BTN,
                                         fill=COL_MK_ACCENT if accented else "#eef1f6",
                                         outline=COL_MK_ACCENT if accented else "#9aa3b2",
                                         tags=(tag, "btn", f"b{idx}_{k}"))
                     cv.tag_bind(tag, "<Button-1>", lambda e, i=idx, k=k: self._on_accent_click(i, k))
                     cv.tag_bind(tag, "<Enter>", lambda e, t=f"b{idx}_{k}", a=accented: self._acc_hover(t, a, True))
                     cv.tag_bind(tag, "<Leave>", lambda e, t=f"b{idx}_{k}", a=accented: self._acc_hover(t, a, False))
+                if pat is not None:
+                    lv = pat[k]
+                    if lv is None:
+                        prev = None                     # タグなどで線を切る
+                    else:
+                        py = y + (y_hi if lv else y_lo)
+                        if prev and prev[1] == y:
+                            drop = prev[2] == 1 and lv == 0     # アクセントで下がる所は赤
+                            cv.create_line(prev[0], prev[3], cx, py, width=LW + (1 if drop else 0),
+                                           fill=COL_MK_ACCENT if drop else COL_PITCH, tags=("pitch",))
+                        cv.create_oval(cx - R, py - R, cx + R, py + R, fill=COL_PITCH, outline="", tags=("dot",))
+                        prev = (cx, y, lv, py)
                 x += uw
             self._acc_bg(seg_x, x, y, ROW)
-            x += 2
-        cv.configure(scrollregion=(0, 0, W, y + ROW + 4))
+            x += sc(2)
+        cv.tag_raise("dot")
+        cv.configure(scrollregion=(0, 0, W, y + ROW + sc(4)))
         cv.yview_moveto(top)
 
     def _acc_bg(self, x1, x2, y, row):
         """文節のまとまりを、薄い背景で示す"""
         if x2 > x1:
-            r = self.acc_cv.create_rectangle(x1 - 1, y + 1, x2 + 1, y + row - 8, fill="#f4f6fa", outline="#dde2ea")
+            r = self.acc_cv.create_rectangle(x1 - 1, y + 1, x2 + 1, y + row - self._sc(8), fill="#f4f6fa", outline="#dde2ea")
             self.acc_cv.tag_lower(r)
 
     def _acc_hover(self, tag, accented, on):
@@ -614,6 +826,13 @@ class App:
         if idx >= len(items) or not isinstance(items[idx], core.Phrase) or k >= len(items[idx].units):
             return
         dels, ins = core.accent_edits(items[idx], k)
+        self._apply_accent_edits(dels, ins)
+        u = items[idx].units[k].text.lstrip("_")
+        self._refresh_status(f"「{u}」にアクセントを付けました" if ins is not None else "アクセントを外しました（平板）")
+
+    def _apply_accent_edits(self, dels, ins):
+        """' を消す位置と入れる位置（元の文字列での位置）どおりに、変換結果の欄を書き換える"""
+        t = self.out_text
         t.edit_separator()
         if ins is not None:
             t.insert(f"1.0+{ins}c", core.ACCENT)
@@ -622,8 +841,61 @@ class App:
             t.delete(f"1.0+{pos}c")
         t.edit_separator()
         self._show_issues(core.validate(t.get("1.0", "end-1c")))
-        u = items[idx].units[k].text.lstrip("_")
-        self._refresh_status(f"「{u}」にアクセントを付けました" if ins is not None else "アクセントを外しました（平板）")
+
+    # キーボードでのアクセント操作（変換結果の欄のカーソルがある文節が対象）
+    def _phrase_at_cursor(self):
+        t = self.out_text
+        pos = len(t.get("1.0", "insert"))
+        for it in core.split_phrases(t.get("1.0", "end-1c")):
+            if isinstance(it, core.Phrase) and it.start <= pos <= it.end:
+                return pos, it
+        self._refresh_status([("アクセントを動かすには、", None), ("変換結果の欄で、文節の中にカーソルを置いてください", "warn")])
+        return pos, None
+
+    def _set_accent(self, ph, k):
+        dels, ins = core.set_accent_edits(ph, k)
+        if not dels and ins is None:
+            self._refresh_status("この文節は、すでにその形です" if k is not None else "この文節は、すでに平板です")
+            return
+        self._apply_accent_edits(dels, ins)
+        word = "".join(u.text.lstrip("_") for u in ph.units)
+        if k is None:
+            self._refresh_status(f"「{word}」のアクセントを外しました（平板）")
+        else:
+            self._refresh_status(f"「{word}」の「{ph.units[k].text.lstrip('_')}」にアクセントを付けました")
+
+    def move_accent(self, d):
+        """アクセントを前（d=-1）／後ろ（d=1）の文字へ。端まで行くと平板、平板からは端の文字へ"""
+        _, ph = self._phrase_at_cursor()
+        if not ph:
+            return
+        ks = [k for k, u in enumerate(ph.units) if u.can_accent]
+        if not ks:
+            self._refresh_status("この文節には、アクセントを置ける文字がありません")
+            return
+        cur = ph.accents[0] if ph.accents else None
+        if cur is None:
+            target = ks[-1] if d < 0 else ks[0]
+        else:
+            nxt = [k for k in ks if (k < cur if d < 0 else k > cur)]
+            target = (nxt[-1] if d < 0 else nxt[0]) if nxt else None
+        self._set_accent(ph, target)
+
+    def accent_at_cursor(self):
+        pos, ph = self._phrase_at_cursor()
+        if not ph:
+            return
+        hit = [k for k, u in enumerate(ph.units) if u.start < pos <= u.end]
+        if not hit or not ph.units[hit[0]].can_accent:
+            self._refresh_status([("カーソルの前の文字には、アクセントを置けません", "warn"),
+                                  ("（ー・っ・ん・記号には置けません）", None)])
+            return
+        self._set_accent(ph, hit[0])
+
+    def clear_accent(self):
+        _, ph = self._phrase_at_cursor()
+        if ph:
+            self._set_accent(ph, None)
 
     # ── 試聴（AquesTalkPlayer） ─────────────────────
     def _preview_text(self) -> str:
@@ -950,6 +1222,7 @@ class App:
         ttk.Button(bot, text="編集", command=self.edit_entry).pack(side="left", padx=4)
         ttk.Button(bot, text="削除", command=self.delete_entries).pack(side="left")
         ttk.Button(bot, text="別名で書き出す…", command=self.export_dict).pack(side="right")
+        ttk.Button(bot, text="バックアップから戻す…", command=self.restore_dict).pack(side="right", padx=(6, 0))
         ttk.Button(bot, text="他の辞書を取り込む…", command=self.import_dict).pack(side="right", padx=6)
         self._fill_dict()
 
@@ -1004,6 +1277,7 @@ class App:
         sel = self.dict_tv.selection()
         if not sel or not messagebox.askyesno(APP_NAME, f"{len(sel)} 件を削除しますか？"):
             return
+        self._backup_dict()
         for s in sel:
             self.dic.remove(s)
         self.save_dict()
@@ -1018,11 +1292,77 @@ class App:
         except Exception as ex:
             messagebox.showerror(APP_NAME, f"読み込めませんでした。\n{ex}")
             return
+        self._backup_dict()
         added, skipped = self.dic.merge(other)
         self.save_dict()
         self._fill_dict()
         messagebox.showinfo(APP_NAME, f"{added} 件を取り込みました。\n"
                                       f"（すでにある {skipped} 件は、自分の辞書を優先して残しました）")
+
+    def restore_dict(self):
+        files = core.list_backups(BACKUP_DIR)
+        if not files:
+            messagebox.showinfo(APP_NAME, "バックアップはまだありません。\n\n"
+                                "辞書のバックアップは、起動したときと、削除・取り込み・戻すの前に、"
+                                f"自動で作られます（{os.path.basename(BACKUP_DIR)} フォルダ・新しい{BACKUP_KEEP}個まで）。")
+            return
+        w = tk.Toplevel(self.root)
+        w.title("辞書をバックアップから戻す")
+        w.transient(self.root)
+        ttk.Label(w, text="戻したい時点を選んでください（新しい順）。今の辞書も、戻す前にバックアップに残します。",
+                  padding=(10, 8)).pack(anchor="w")
+        lb = tk.Listbox(w, height=12, width=46, font=self.fonts["ui"], activestyle="none")
+        lb.pack(fill="both", expand=True, padx=10)
+        for p in files:
+            m = re.search(r"(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})(\d{2})", os.path.basename(p))
+            when = f"{m[1]}/{m[2]}/{m[3]} {m[4]}:{m[5]}:{m[6]}" if m else os.path.basename(p)
+            try:
+                n = f"{len(core.Dictionary.load(p).entries)} 件"
+            except Exception:
+                n = "読めません"
+            lb.insert("end", f"{when}　　{n}")
+        lb.selection_set(0)
+
+        def do_restore():
+            sel = lb.curselection()
+            if not sel:
+                return
+            p = files[sel[0]]
+            try:
+                d = core.Dictionary.load(p)
+            except Exception as ex:
+                messagebox.showerror(APP_NAME, f"このバックアップは読めませんでした。\n{ex}", parent=w)
+                return
+            if not messagebox.askyesno(APP_NAME, f"辞書を {lb.get(sel[0]).split()[0]} {lb.get(sel[0]).split()[1]} の状態"
+                                                 f"（{len(d.entries)} 件）に戻しますか？\n今の辞書は、バックアップに残します。", parent=w):
+                return
+            self.save_dict()
+            self._backup_dict()
+            self.dic = d
+            self.save_dict()
+            self._fill_dict()
+            w.destroy()
+            self._refresh_status(f"辞書をバックアップから戻しました（{len(d.entries)} 件）")
+
+        bf = ttk.Frame(w, padding=10)
+        bf.pack(fill="x")
+        ttk.Button(bf, text="この時点に戻す", style="Big.TButton", command=do_restore).pack(side="left")
+        ttk.Button(bf, text="フォルダを開く", command=lambda: self._open_path(BACKUP_DIR)).pack(side="left", padx=6)
+        ttk.Button(bf, text="閉じる", command=w.destroy).pack(side="right")
+        lb.bind("<Double-1>", lambda e: do_restore())
+        w.bind("<Escape>", lambda e: w.destroy())
+        w.grab_set()
+
+    def _open_path(self, path):
+        try:
+            if sys.platform.startswith("win"):
+                os.startfile(path)
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", path])
+            else:
+                subprocess.Popen(["xdg-open", path])
+        except Exception as ex:
+            messagebox.showerror(APP_NAME, f"開けませんでした。\n{path}\n{ex}")
 
     def export_dict(self):
         p = filedialog.asksaveasfilename(title="辞書を書き出す", defaultextension=".json",
@@ -1055,7 +1395,7 @@ class App:
         tab = ttk.Frame(nb, padding=10)
         nb.add(tab, text="　設定　")
         self.settings_tab = tab
-        ttk.Label(tab, text="試聴（AquesTalkPlayer）", font=(self.f_ui[0], 11, "bold")).pack(anchor="w")
+        ttk.Label(tab, text="試聴（AquesTalkPlayer）", font=self.fonts["title"]).pack(anchor="w")
         row = ttk.Frame(tab)
         row.pack(fill="x", pady=6)
         ttk.Label(row, text="AquesTalkPlayer.exe の場所:").pack(side="left")
@@ -1077,7 +1417,128 @@ class App:
                 "自分用のプリセット（例：まりさ抑揚）を作り、その名前を変換タブの「声（プリセット）」に入れてください。")
         if not IS_WINDOWS:
             note += "\n\n※ AquesTalkPlayerは Windows 用のソフトなので、この環境では試聴できません。"
-        ttk.Label(tab, text=note, foreground="#444", wraplength=960, justify="left").pack(anchor="w", pady=(4, 0))
+        nl = ttk.Label(tab, text=note, foreground="#444", justify="left")
+        nl.pack(anchor="w", fill="x", pady=(4, 0))
+        tab.bind("<Configure>", lambda e: nl.configure(wraplength=max(e.width - 30, 300)), add="+")
+
+        # 文字の大きさ
+        ttk.Separator(tab).pack(fill="x", pady=10)
+        ttk.Label(tab, text="文字の大きさ", font=self.fonts["title"]).pack(anchor="w")
+        fr = ttk.Frame(tab)
+        fr.pack(fill="x", pady=4)
+        self.scale_var = tk.IntVar(value=round(self.scale * 100))
+        sp = ttk.Spinbox(fr, from_=round(SCALE_MIN * 100), to=round(SCALE_MAX * 100), increment=10, width=5,
+                         textvariable=self.scale_var, font=self.fonts["ui"],
+                         command=lambda: self.set_scale(self.scale_var.get() / 100))
+        sp.pack(side="left")
+        sp.bind("<Return>", lambda e: self._scale_from_box())
+        sp.bind("<FocusOut>", lambda e: self._scale_from_box())
+        ttk.Label(fr, text="%").pack(side="left", padx=(2, 12))
+        for label, v in (("小 90%", 0.9), ("標準 100%", 1.0), ("大 130%", 1.3), ("特大 160%", 1.6)):
+            ttk.Button(fr, text=label, command=lambda v=v: self.set_scale(v)).pack(side="left", padx=2)
+        ttk.Label(tab, text=f"{round(SCALE_MIN * 100)}%〜{round(SCALE_MAX * 100)}% の間で、10% ずつ変えられます。"
+                            "Ctrl＋マウスホイールや、下のショートカットでも変えられます。ウィンドウも同じ割合で大きくなります。",
+                  foreground="#444").pack(anchor="w")
+
+        # ショートカット
+        ttk.Separator(tab).pack(fill="x", pady=10)
+        ttk.Label(tab, text="ショートカットキー", font=self.fonts["title"]).pack(anchor="w")
+        ttk.Label(tab, text="行をダブルクリックするか［変更…］を押してから、割り当てたいキーを押してください"
+                            "（Ctrl・Alt・Shift との組み合わせ、または F1〜F12）。",
+                  foreground="#444").pack(anchor="w")
+        kf = ttk.Frame(tab)
+        kf.pack(fill="both", expand=True, pady=4)
+        tv = ttk.Treeview(kf, columns=("name", "key"), show="headings", height=7, selectmode="browse")
+        tv.heading("name", text="操作")
+        tv.heading("key", text="キー")
+        tv.column("name", width=self._sc(420), stretch=True)
+        tv.column("key", width=self._sc(180), anchor="center", stretch=False)
+        ks = ttk.Scrollbar(kf, command=tv.yview)
+        tv.configure(yscrollcommand=ks.set)
+        tv.pack(side="left", fill="both", expand=True)
+        ks.pack(side="left", fill="y")
+        kb = ttk.Frame(kf)
+        kb.pack(side="left", fill="y", padx=(8, 0))
+        ttk.Button(kb, text="変更…", command=self.change_key).pack(fill="x")
+        ttk.Button(kb, text="外す", command=self.clear_key).pack(fill="x", pady=4)
+        ttk.Button(kb, text="すべて最初に戻す", command=self.reset_keys).pack(fill="x")
+        tv.bind("<Double-1>", lambda e: self.change_key())
+        self.keys_tv = tv
+        self._fill_keys()
+
+    def _scale_from_box(self):
+        try:
+            self.set_scale(int(self.scale_var.get()) / 100)
+        except (tk.TclError, ValueError):
+            self.scale_var.set(round(self.scale * 100))
+
+    def _fill_keys(self):
+        tv = self.keys_tv
+        sel = tv.selection()
+        tv.delete(*tv.get_children())
+        for aid, name, _ in SHORTCUTS:
+            tv.insert("", "end", iid=aid, values=(name, self._key_label(aid)))
+        if sel and tv.exists(sel[0]):
+            tv.selection_set(sel[0])
+
+    def change_key(self):
+        sel = self.keys_tv.selection()
+        if not sel:
+            return
+        aid = sel[0]
+        name = next(n for a, n, _ in SHORTCUTS if a == aid)
+        w = tk.Toplevel(self.root)
+        w.title("キーの割り当て")
+        w.transient(self.root)
+        ttk.Label(w, text=f"「{name}」に割り当てるキーを押してください。\n"
+                          "（Ctrl・Alt・Shift との組み合わせ、または F1〜F12）\nEsc でやめます。",
+                  justify="center", padding=(24, 16)).pack()
+        info = tk.StringVar()
+        ttk.Label(w, textvariable=info, foreground=MSG_STYLE["crit"]["fg"], padding=(16, 0, 16, 14)).pack()
+        alt_bit = 0x20000 if IS_WINDOWS else 0x8
+
+        def on_key(e):
+            ctrl, shift, alt = bool(e.state & 0x4), bool(e.state & 0x1), bool(e.state & alt_bit)
+            if e.keysym == "Escape" and not (ctrl or shift or alt):
+                w.destroy()
+                return "break"
+            seq = core.shortcut_from_keys(e.keysym, ctrl, shift, alt)
+            if not seq:
+                if e.keysym not in core.MODIFIER_KEYS:
+                    info.set("文字の入力とぶつかるので、Ctrl か Alt と組み合わせてください（F1〜F12 はそのままで使えます）")
+                return "break"
+            same = set(core.shortcut_variants(seq))
+            others = [(a, n) for a, n, _ in SHORTCUTS if a != aid and same & set(core.shortcut_variants(self._key(a)))]
+            if others and not messagebox.askyesno(
+                    APP_NAME, f"{core.shortcut_label(seq)} は「{others[0][1]}」に使われています。\n"
+                              f"「{others[0][1]}」の割り当てを外して、「{name}」に付けますか？", parent=w):
+                return "break"
+            for a, _ in others:
+                self.shortcuts[a] = ""
+            self.shortcuts[aid] = seq
+            self._bind_shortcuts()
+            self._save_conf()
+            w.destroy()
+            self._refresh_status(f"「{name}」を {core.shortcut_label(seq)} にしました")
+            return "break"
+
+        w.bind("<KeyPress>", on_key)
+        w.grab_set()
+        w.focus_force()
+
+    def clear_key(self):
+        sel = self.keys_tv.selection()
+        if sel:
+            self.shortcuts[sel[0]] = ""
+            self._bind_shortcuts()
+            self._save_conf()
+
+    def reset_keys(self):
+        if messagebox.askyesno(APP_NAME, "ショートカットキーを、すべて最初の割り当てに戻しますか？"):
+            self.shortcuts = {}
+            self._bind_shortcuts()
+            self._save_conf()
+            self._refresh_status("ショートカットキーを最初の割り当てに戻しました")
 
     def browse_player(self):
         cur = self.player_path.get().strip()

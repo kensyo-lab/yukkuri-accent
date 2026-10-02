@@ -877,6 +877,46 @@ def accent_edits(ph: Phrase, k: int) -> tuple[list[int], int | None]:
     return list(ph.marks), ph.units[k].end
 
 
+def set_accent_edits(ph: Phrase, k: int | None) -> tuple[list[int], int | None]:
+    """付け外しを切り替えずに、k 拍目の後ろにアクセントを置く（k が None なら外して平板に）。"""
+    if k is None:
+        return list(ph.marks), None
+    if ph.accents == [k] and len(ph.marks) == 1:
+        return [], None        # すでにその形
+    return list(ph.marks), ph.units[k].end
+
+
+def is_mora(u: Mora) -> bool:
+    """高低の線を描く拍か（仮名と ー。タグや 〓 などの記号は拍に数えない）"""
+    t = u.text.lstrip(DEVOICE)
+    return bool(t) and (is_hira(t[0]) or is_kata(t[0]) or t[0] == "ー")
+
+
+def pitch_pattern(ph: Phrase, high_start: bool = False) -> list[int | None]:
+    """文節の各拍の高さ（1=高 / 0=低 / None=拍ではない）。東京式アクセントの基本形:
+    - 平板（' なし）: 低高高高…
+    - 頭高（1拍目に '）: 高低低低…
+    - それ以外: 低高…高（' の拍まで）低低…
+    high_start: 前の区切りが「;」（次の句が高く始まる）のとき、1拍目を高くする。"""
+    moras = [k for k, u in enumerate(ph.units) if is_mora(u)]
+    out: list[int | None] = [None] * len(ph.units)
+    if not moras:
+        return out
+    pos = None                       # アクセント核が何拍目か
+    if ph.accents:
+        k = ph.accents[0]
+        before = [j for j, m in enumerate(moras) if m <= k]
+        pos = before[-1] if before else 0
+    for j, m in enumerate(moras):
+        if pos is None:
+            out[m] = 1 if (j > 0 or high_start) else 0
+        elif pos == 0:
+            out[m] = 1 if j == 0 else 0
+        else:
+            out[m] = 1 if (0 < j <= pos or (j == 0 and high_start)) else 0
+    return out
+
+
 def apply_accent(s: str, ph: Phrase, k: int) -> str:
     dels, ins = accent_edits(ph, k)
     chars = list(s)
@@ -1076,3 +1116,101 @@ def _strip_particle(b: str, a: str) -> tuple[str, str]:
         if b.endswith(p) and a.endswith(p) and _skel_len(a) - len(p) >= 2:
             return b[:-len(p)], a[:-len(p)]
     return b, a
+
+
+# ─────────────────────────────────────────────
+# 辞書のバックアップ
+# ─────────────────────────────────────────────
+BACKUP_PREFIX = "accent_dict_"
+
+
+def backup_file(path: str, folder: str, keep: int = 20, now: _dt.datetime | None = None) -> str | None:
+    """path を folder に日時つきで写す。いちばん新しいバックアップと中身が同じなら写さない。
+    keep より古いものは消す。写したファイルの場所（写さなかったら None）を返す。"""
+    try:
+        with open(path, "rb") as f:
+            data = f.read()
+    except OSError:
+        return None
+    os.makedirs(folder, exist_ok=True)
+    old = list_backups(folder)
+    if old:
+        try:
+            with open(old[0], "rb") as f:
+                if f.read() == data:
+                    return None
+        except OSError:
+            pass
+    stamp = (now or _dt.datetime.now()).strftime("%Y%m%d-%H%M%S")
+    dst = os.path.join(folder, f"{BACKUP_PREFIX}{stamp}.json")
+    n = 1
+    while os.path.exists(dst):            # 同じ秒に2回写すとき
+        n += 1
+        dst = os.path.join(folder, f"{BACKUP_PREFIX}{stamp}-{n}.json")
+    with open(dst, "wb") as f:
+        f.write(data)
+    for p in list_backups(folder)[keep:]:
+        try:
+            os.remove(p)
+        except OSError:
+            pass
+    return dst
+
+
+def list_backups(folder: str) -> list[str]:
+    """バックアップの一覧（新しい順）"""
+    try:
+        names = [n for n in os.listdir(folder) if n.startswith(BACKUP_PREFIX) and n.endswith(".json")]
+    except OSError:
+        return []
+    return [os.path.join(folder, n) for n in sorted(names, reverse=True)]
+
+
+# ─────────────────────────────────────────────
+# ショートカットキー（Tk のキー名と、画面に出す名前）
+# ─────────────────────────────────────────────
+# 例: "<Control-Shift-Key-V>"。数字は "<Control-1>" だとマウスのボタンになるので、必ず "Key-" を付ける
+KEY_NAMES = {
+    "Return": "Enter", "plus": "+", "minus": "-", "equal": "=", "semicolon": ";", "colon": ":",
+    "comma": ",", "period": ".", "slash": "/", "backslash": "\\", "space": "Space", "Escape": "Esc",
+    "Left": "←", "Right": "→", "Up": "↑", "Down": "↓", "Prior": "PageUp", "Next": "PageDown",
+    "bracketleft": "[", "bracketright": "]", "at": "@", "asciicircum": "^", "underscore": "_",
+}
+MODIFIER_KEYS = {"Shift_L", "Shift_R", "Control_L", "Control_R", "Alt_L", "Alt_R", "Meta_L", "Meta_R",
+                 "Super_L", "Super_R", "Win_L", "Win_R", "Caps_Lock", "Num_Lock", "App",
+                 "ISO_Level3_Shift", "Kanji", "Hiragana_Katakana", "Muhenkan", "Henkan", "Zenkaku_Hankaku"}
+
+
+def shortcut_from_keys(keysym: str, ctrl: bool, shift: bool, alt: bool) -> str | None:
+    """押されたキーから、割り当てに使うキー名を作る。使えない押し方なら None。
+    文字の入力とぶつからないよう、Ctrl/Alt なしで使えるのは F1〜F12 だけ。"""
+    if not keysym or keysym in MODIFIER_KEYS:
+        return None
+    fkey = re.fullmatch(r"F([1-9]|1[0-2])", keysym)
+    if not (ctrl or alt or fkey):
+        return None
+    if len(keysym) == 1 and keysym.isalpha():
+        keysym = keysym.upper() if shift else keysym.lower()
+    mods = [m for m, on in (("Control", ctrl), ("Alt", alt), ("Shift", shift)) if on]
+    return "<" + "-".join(mods + ["Key", keysym]) + ">"
+
+
+def shortcut_label(seq: str) -> str:
+    """"<Control-Shift-Key-V>" → "Ctrl+Shift+V"。空なら "（なし）"。"""
+    if not seq:
+        return "（なし）"
+    parts = seq.strip("<>").split("-")
+    key = parts[-1]
+    mods = parts[:-2] if len(parts) >= 2 and parts[-2] == "Key" else parts[:-1]
+    names = {"Control": "Ctrl", "Alt": "Alt", "Shift": "Shift"}
+    k = KEY_NAMES.get(key, key.upper() if len(key) == 1 else key)
+    return "+".join([names.get(m, m) for m in mods] + [k])
+
+
+def shortcut_variants(seq: str) -> list[str]:
+    """英字キーは、大文字・小文字のどちらで届いても効くように両方を返す（CapsLock などで変わるため）"""
+    m = re.fullmatch(r"<(.*-)?Key-([A-Za-z])>", seq or "")
+    if not m:
+        return [seq] if seq else []
+    pre = m.group(1) or ""
+    return [f"<{pre}Key-{m.group(2).lower()}>", f"<{pre}Key-{m.group(2).upper()}>"]

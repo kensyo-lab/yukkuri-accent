@@ -5,3 +5,5 @@ numbers_old_backup.json
 settings.json
 *.tmp
 __pycache__/
+backup/
+accent_dict_broken_*.json
