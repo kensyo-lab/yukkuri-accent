@@ -817,6 +817,32 @@ def load_player_presets(path: str) -> list[tuple[str, bool]]:
     return out
 
 
+def _join_lines(s: str) -> str:
+    """試聴用に行をつなぐ。句読点で終わっていない行の後ろには「。」を補う。"""
+    out = ""
+    for x in (normalize(x).strip() for x in s.splitlines()):
+        if not x:
+            continue
+        if out and out[-1] not in "。、？！,":
+            out += "。"
+        out += x
+    return out
+
+
+def preview_text(selected: str | None, whole: str) -> tuple[str, bool]:
+    """試聴で読み上げる記号列を決める。選択した所に仮名が1つもなければ（改行・空白・記号だけを
+    うっかり選んでいたときなど）、選択は無視して全体を読む。全体にも仮名がなければ空を返す。
+    戻り値: (読み上げる記号列, 選択した所だけを読むか)"""
+    def has_kana(t):
+        return any(is_hira(c) or is_kata(c) for c in TAG_RE.sub("", t))
+    if selected:
+        t = _join_lines(selected)
+        if has_kana(t):
+            return t, True
+    t = _join_lines(whole)
+    return (t if has_kana(t) else ""), False
+
+
 def split_phrases(s: str) -> list[Phrase | Sep]:
     """記号列を、文節（Phrase）と区切り（Sep）の並びに分ける。<タグ> は1つの拍（アクセント不可）として扱う。"""
     tags = {m.start(): m.end() for m in TAG_RE.finditer(s)}
