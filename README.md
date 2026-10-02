@@ -1,4 +1,6 @@
-# ゆっくりアクセント辞書 v0.5
+# ゆっくりアクセント辞書
+
+[![最新版](https://img.shields.io/github/v/release/kensyo-lab/yukkuri-accent?label=%E6%9C%80%E6%96%B0%E7%89%88)](https://github.com/kensyo-lab/yukkuri-accent/releases/latest)
 
 YMM4が出力するAquesTalk（ゆっくりボイス）の読み記号列を、**作者さん自身の辞書**で自動補正するツールです。
 直し方はプログラムには書き込まず、辞書（`accent_dict.json`）と数字の読み表（`numbers.json`）に置いています。使うほど、その人のクセを覚えていきます。
@@ -15,8 +17,9 @@ YMM4に貼る前に耳で確かめられるので、「直す → 聞く → ま
 2. 好きなフォルダに展開します（例: `C:\Users\（ユーザー名）\yukkuri-accent`）。「Program Files」の中や、OneDrive などの同期フォルダは避けてください。OneDrive のバックアップがオンだと「デスクトップ」「ドキュメント」も OneDrive の中になります（こうした場所で起動すると、メッセージ欄で知らせます）
 3. `yukkuri-accent.exe` をダブルクリックして起動します
 
-初回起動時に、同じフォルダに `accent_dict.json`（空の辞書）と `numbers.json`（数字の読み表）が作られます。
-新しい版に入れ替えるときは、この2つのファイルを残したまま `yukkuri-accent.exe` だけを差し替えてください。
+初回起動時に、同じフォルダに `accent_dict.json`（空の辞書）・`numbers.json`（数字の読み表）・`settings.json`（設定）と、`backup` フォルダ（辞書のバックアップ）が作られます。
+新しい版に入れ替えるときは、ユーザーデータの `accent_dict.json`（辞書）・`numbers.json`（数字の読み表）・`settings.json`（設定）・`backup` フォルダ（辞書のバックアップ）はそのまま残し、それ以外の配布ファイル（`yukkuri-accent.exe`・README・FAQ・CHANGELOG・`dictionaries` など）は、新しい版のもので置き換えてください。
+（.exe だけを差し替えても動きますが、README・FAQ・作者の辞書が古いまま残ってしまいます）
 
 > **「WindowsによってPCが保護されました」と出たら**
 > 個人が作った署名のないソフトなので、初回に表示されることがあります。「詳細情報」→「実行」で起動できます。
@@ -24,6 +27,8 @@ YMM4に貼る前に耳で確かめられるので、「直す → 聞く → ま
 > 気になる場合は、下の「Pythonで動かす方法」を使ってください。中身はすべてこのリポジトリで公開しています。
 
 ### Pythonで動かす方法
+> **Python で動かす場合は、Windows 版の zip ではなく、GitHub の「Source code (zip)」またはリポジトリ本体を取得してください。**（Windows 版の zip には .exe しか入っていません）
+
 Python 3.8以降（tkinter付き）が入っていれば、追加のインストールは要りません。
 `yukkuri-accent.pyw` をダブルクリックすると、コンソール画面を出さずに起動します。コマンドで起動する場合は次のとおりです。
 
@@ -122,7 +127,7 @@ python accent_app.py
 
 > **AquesTalkPlayer について**
 > - AquesTalkPlayer は株式会社アクエストのソフトウェアです。このツールには**同梱していません**（再配布は禁止されています）。必ず各自で[公式サイト](https://www.a-quest.com/products/aquestalkplayer.html)から入手してください
-> - **個人の非営利使用は無料**です。**営利目的で使う場合は、アクエストから使用ライセンスを購入する必要があります**。詳しくは公式サイトの利用規約をご確認ください
+> - **個人の非営利使用は無料**です。それ以外の利用（会社・団体での利用や、収益化する動画での利用など）では、**使用ライセンスが必要になる場合があります**。どの利用が当てはまるかは、**必ず公式サイトでご確認ください**
 
 ## 数字の扱い
 YMM4は数字を `<NUMK VAL=6.39 COUNTER=にち>` のようなタグで出し、その部分は前後から切り離して読まれます。

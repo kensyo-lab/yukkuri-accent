@@ -76,6 +76,7 @@ jobs:
           New-Item -ItemType Directory -Force "pkg/yukkuri-accent" | Out-Null
           Copy-Item dist/yukkuri-accent.exe pkg/yukkuri-accent/
           Copy-Item README.md, FAQ.md, LICENSE pkg/yukkuri-accent/
+          python tools/stamp_readme.py pkg/yukkuri-accent/README.md "$env:TAG"
           python tools/make_changelog.py pkg/yukkuri-accent/CHANGELOG.md
           Copy-Item -Recurse dictionaries pkg/yukkuri-accent/
           Compress-Archive -Path pkg/yukkuri-accent -DestinationPath "$name.zip"
