@@ -23,3 +23,22 @@ for path, kw, want in [
     assert got == want, (path, got, want)
     n += 1
 print(f"置き場所 {n} 件 OK")
+
+# 試聴で読む所（うっかり改行や記号だけを選んでいたら全体を読む）
+from accent_core import preview_text
+WHOLE = "ぶ'んしょうです。\nこれわ/て_スと"
+m = 0
+for sel, want in [
+    (None, ("ぶ'んしょうです。これわ/て_スと", False)),
+    ("こ'れわ", ("こ'れわ", True)),
+    ("\n", ("ぶ'んしょうです。これわ/て_スと", False)),      # 改行だけ → 全体
+    ("。", ("ぶ'んしょうです。これわ/て_スと", False)),      # 記号だけ → 全体
+    ("  ", ("ぶ'んしょうです。これわ/て_スと", False)),      # 空白だけ → 全体
+]:
+    got = preview_text(sel, WHOLE)
+    assert got == want, (sel, got)
+    m += 1
+assert preview_text(None, "") == ("", False)
+assert preview_text("。", "、。") == ("", False)                # 全体にも仮名がなければ空
+assert preview_text(None, "<NUMK VAL=3>") == ("", False)        # タグだけも読めない
+print(f"試聴で読む所 {m + 3} 件 OK")

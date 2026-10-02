@@ -22,7 +22,7 @@ from tkinter import ttk, messagebox, filedialog
 import accent_core as core
 
 APP_NAME = "ゆっくりアクセント辞書"
-VERSION = "0.5.2"
+VERSION = "0.5.3"
 
 if getattr(sys, "frozen", False):
     BASE_DIR = os.path.dirname(sys.executable)
@@ -1029,20 +1029,13 @@ class App:
 
     # ── 試聴（AquesTalkPlayer） ─────────────────────
     def _preview_text(self) -> str:
-        """選択範囲があればその部分、なければ全体。行の区切りは、句読点で終わっていなければ「。」を補う。"""
+        """選択範囲があればその部分、なければ全体（選択に読める文字がなければ全体）。"""
         t = self.out_text
-        if t.tag_ranges("sel"):
-            s = t.get("sel.first", "sel.last")
-        else:
-            s = t.get("1.0", "end-1c")
-        out = ""
-        for x in (core.normalize(x).strip() for x in s.splitlines()):
-            if not x:
-                continue
-            if out and out[-1] not in "。、？！,":
-                out += "。"
-            out += x
-        return out
+        sel = t.get("sel.first", "sel.last") if t.tag_ranges("sel") else None
+        text, partial = core.preview_text(sel, t.get("1.0", "end-1c"))
+        # 改行や記号だけをうっかり選んでいたときは、全体を読んだことを知らせる
+        self._preview_note = "（選択した所に読める文字がなかったので、全体を読み上げています）" if sel and not partial else ""
+        return text
 
     def _remember_voice(self, name):
         if name:
@@ -1116,7 +1109,7 @@ class App:
         text = self._preview_text()
         if not text:
             messagebox.showinfo(APP_NAME, "読み上げる所がありません。\n"
-                                "変換結果の欄に読みを入れてから押してください。")
+                                "変換結果の欄に、仮名の読みが入っていません。①に YMM4 の読みを貼って変換してから押してください。")
             return
         voice = self.voice.get().strip()
 
@@ -1180,7 +1173,7 @@ class App:
         try:
             winsound.PlaySound(wav, winsound.SND_FILENAME | winsound.SND_ASYNC)
             if not self._warn_bouyomi(voice):
-                self._refresh_status(f"試聴：再生中（{voice or '前回のプリセット'}）\n{self._preview_said}")
+                self._refresh_status(f"試聴：再生中（{voice or '前回のプリセット'}）{self._preview_note}\n{self._preview_said}")
         except RuntimeError as ex:
             messagebox.showerror(APP_NAME, f"音声を再生できませんでした。\n{ex}")
 
