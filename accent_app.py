@@ -22,7 +22,7 @@ from tkinter import ttk, messagebox, filedialog
 import accent_core as core
 
 APP_NAME = "ゆっくりアクセント辞書"
-VERSION = "0.5.3"
+VERSION = "0.6"
 
 if getattr(sys, "frozen", False):
     BASE_DIR = os.path.dirname(sys.executable)
@@ -151,6 +151,8 @@ class App:
         self._wav = None           # いま再生している一時WAV
         self._texts = []
         self._out_converted = ""   # 最後に［変換］した結果（手直しの有無を見るため）
+        self._out_prepared = ""    # 同じく、辞書を当てる前の形（「辞書適用前に戻す」用）
+        self._raw_converted = ""   # 同じく、変換に使った YMM4 の読み（「学習候補に送る」用）
         self._out_sent = None      # 最後に学習タブへ送った変換結果
 
         nb = ttk.Notebook(root)
@@ -572,6 +574,7 @@ class App:
         tk.Label(lab, text=" 注意 ", bg=COL_WARN, fg="black", font=self.f_ui).pack(side="right", padx=4)
         tk.Label(lab, text=" エラー ", bg=COL_ERROR, fg="black", font=self.f_ui).pack(side="right")
         frm, self.out_text = self._text(tab, 5)
+        self.out_text.bind("<Button-3>", self._out_right_click)
         frm.pack(fill="both", expand=True, pady=(4, 6))
         self.out_text.tag_configure("applied", background=COL_APPLIED)
         self.out_text.tag_configure("warn", background=COL_WARN)
@@ -633,6 +636,8 @@ class App:
         self.out_text.delete("1.0", "end")
         self.out_text.insert("1.0", res.text)
         self._out_converted = res.text
+        self._out_prepared = core.prepare(raw, self.numbers)
+        self._raw_converted = raw
         for a in res.applied:
             self.out_text.tag_add("applied", f"1.0+{a.start}c", f"1.0+{a.end}c")
         self._show_issues(res.issues)
@@ -749,6 +754,7 @@ class App:
         cv.tag_bind("dot", "<ButtonRelease-1>", self._dot_release)
         cv.tag_bind("dot", "<Enter>", lambda e: cv.configure(cursor="sb_v_double_arrow"))
         cv.tag_bind("dot", "<Leave>", lambda e: self._drag or cv.configure(cursor=""))
+        cv.bind("<Button-3>", self._acc_right_click)
 
     def _acc_btn_text(self):
         key = self._key("accent_panel")
@@ -853,7 +859,7 @@ class App:
                 font = fas if disp.startswith("<") else (fab if accented else fa)
                 uw = max(font.measure(disp), MINW) + PAD
                 if x + uw > W and x > seg_x:
-                    self._acc_bg(seg_x, x, y, ROW)
+                    self._acc_bg(seg_x, x, y, ROW, f"p{idx}")
                     x = seg_x = X0
                     y += ROW
                     prev = None
@@ -861,12 +867,12 @@ class App:
                 color = (COL_MK_ACCENT if accented else COL_MK_DEVOICE if u.devoiced
                          else "#222" if u.can_accent else "#8a8f98")
                 tag = f"u{idx}_{k}"
-                cv.create_text(cx, y + ty, text=disp, fill=color, font=font, tags=(tag,))
+                cv.create_text(cx, y + ty, text=disp, fill=color, font=font, tags=(tag, f"p{idx}"))
                 if u.can_accent:
                     cv.create_rectangle(cx - BTN / 2, y + sc(4), cx + BTN / 2, y + sc(4) + BTN,
                                         fill=COL_MK_ACCENT if accented else "#eef1f6",
                                         outline=COL_MK_ACCENT if accented else "#9aa3b2",
-                                        tags=(tag, "btn", f"b{idx}_{k}"))
+                                        tags=(tag, "btn", f"b{idx}_{k}", f"p{idx}"))
                     cv.tag_bind(tag, "<Button-1>", lambda e, i=idx, k=k: self._on_accent_click(i, k))
                     cv.tag_bind(tag, "<Enter>", lambda e, t=f"b{idx}_{k}", a=accented: self._acc_hover(t, a, True))
                     cv.tag_bind(tag, "<Leave>", lambda e, t=f"b{idx}_{k}", a=accented: self._acc_hover(t, a, False))
@@ -879,18 +885,111 @@ class App:
                         if prev and prev[1] == y:
                             drop = prev[2] == 1 and lv == 0     # アクセントで下がる所は赤
                             cv.create_line(prev[0], prev[3], cx, py, width=LW + (1 if drop else 0),
-                                           fill=COL_MK_ACCENT if drop else COL_PITCH, tags=("pitch",))
+                                           fill=COL_MK_ACCENT if drop else COL_PITCH, tags=("pitch", f"p{idx}"))
                         dtag = f"d{idx}_{k}"
                         cv.create_oval(cx - R, py - R, cx + R, py + R, fill=COL_PITCH, outline="white",
-                                       tags=("dot", dtag))
+                                       tags=("dot", dtag, f"p{idx}"))
                         self._dot_info[dtag] = (idx, k, y + y_hi, y + y_lo, hs, lv)
                         prev = (cx, y, lv, py)
                 x += uw
-            self._acc_bg(seg_x, x, y, ROW)
+            self._acc_bg(seg_x, x, y, ROW, f"p{idx}")
             x += sc(2)
         cv.tag_raise("dot")
         cv.configure(scrollregion=(0, 0, W, y + ROW + sc(4)))
         cv.yview_moveto(top)
+
+    # ── 文節の右クリック（変換直後に戻す・辞書適用前に戻す・学習候補に送る） ──
+    def _acc_right_click(self, e):
+        cv = self.acc_cv
+        x, y = cv.canvasx(e.x), cv.canvasy(e.y)
+        for item in reversed(cv.find_overlapping(x - 2, y - 2, x + 2, y + 2)):
+            ptag = next((t for t in cv.gettags(item) if re.fullmatch(r"p\d+", t)), None)
+            if ptag:
+                items = core.split_phrases(self.out_text.get("1.0", "end-1c"))
+                i = int(ptag[1:])
+                if i < len(items) and isinstance(items[i], core.Phrase):
+                    self._phrase_menu(e, items[i])
+                return
+
+    def _out_right_click(self, e):
+        t = self.out_text
+        idx = t.index(f"@{e.x},{e.y}")
+        pos = len(t.get("1.0", idx))
+        phrases = [p for p in core.split_phrases(t.get("1.0", "end-1c")) if isinstance(p, core.Phrase)]
+        hit = [p for p in phrases if p.start <= pos <= p.end] or [p for p in phrases if p.end <= pos][-1:]
+        if hit:
+            t.mark_set("insert", idx)
+            self._phrase_menu(e, hit[0])
+        return "break"
+
+    @staticmethod
+    def _short(s, n=24):
+        s = s.replace("\n", "⏎")
+        return s if len(s) <= n else s[:n - 1] + "…"
+
+    def _phrase_menu(self, e, ph):
+        cur = self.out_text.get("1.0", "end-1c")
+        word = cur[ph.start:ph.end]
+        m = tk.Menu(self.root, tearoff=0, font=self.fonts["ui"])
+        m.add_command(label=f"文節「{self._short(word, 16)}」", state="disabled")
+        m.add_separator()
+
+        def add_restore(label, ref, done):
+            r = core.phrase_region(cur, ref, ph.start, ph.end) if ref else None
+            if not r:
+                m.add_command(label=f"{label}（［変換］した後に使えます）", state="disabled")
+                return
+            cs, ce, rs, re_ = r
+            new = ref[rs:re_]
+            if cur[cs:ce] == new:
+                m.add_command(label=f"{label}（変わっていません）", state="disabled")
+            else:
+                m.add_command(label=f"{label}　→ {self._short(new)}",
+                              command=lambda: self._replace_region(cs, ce, new, cur[cs:ce], done))
+        add_restore("この文節を変換直後に戻す", self._out_converted, "変換直後の形に戻しました")
+        add_restore("この文節を辞書適用前に戻す", self._out_prepared, "辞書を当てる前の形に戻しました")
+        m.add_separator()
+        m.add_command(label="この文節を学習候補に送る", command=lambda: self._learn_phrase(ph))
+        try:
+            m.tk_popup(e.x_root, e.y_root)
+        finally:
+            m.grab_release()
+
+    def _replace_region(self, cs, ce, new, old, done):
+        t = self.out_text
+        if t.get("1.0", "end-1c")[cs:ce] != old:          # メニューを出した後に書き換わっていたら何もしない
+            return
+        t.edit_separator()
+        t.delete(f"1.0+{cs}c", f"1.0+{ce}c")
+        t.insert(f"1.0+{cs}c", new)
+        t.edit_separator()
+        self._show_issues(core.validate(t.get("1.0", "end-1c")))
+        self._refresh_status(f"「{self._short(old, 20)}」を{done}：{self._short(new, 30)}（Ctrl+Z で元に戻せます）")
+
+    def _learn_phrase(self, ph):
+        if not self._raw_converted:
+            self._refresh_status([("学習候補に送るには、", None), ("先に①に YMM4 の読みを貼って［変換］してください", "warn")])
+            return
+        cur = self.out_text.get("1.0", "end-1c")
+        r = core.phrase_region(cur, self._out_prepared, ph.start, ph.end)
+        region = core.normalize(cur[r[0]:r[1]] if r else cur[ph.start:ph.end])
+        # 学習タブと同じ方法で候補を出し、この文節の中のものだけ選ぶ
+        picked = [c for c in core.learn(self._raw_converted, cur, self.numbers, self.dic)
+                  if c.dst and core.normalize(c.dst) in region]
+        if not picked:
+            self._refresh_status([("この文節には、辞書に入れる候補になる変更がありません", "warn"),
+                                  ("（変換直後と同じか、数字だけの変更です）", None)])
+            return
+        have = {(c.src, c.dst) for c in self.cands}
+        new = [c for c in picked if (c.src, c.dst) not in have]
+        self.cands.extend(new)
+        self._fill_cands()
+        if not new:
+            self._refresh_status("この文節の候補は、もう学習タブに入っています")
+            return
+        self._refresh_status([(f"学習タブに候補を {len(new)} 件送りました：", None),
+                              ("、".join(self._short(f"{c.src}→{c.dst}", 30) for c in new[:3]), None),
+                              ("\n学習タブで確かめて［チェックしたものを辞書に登録］を押すと、辞書に入ります", "warn")])
 
     # 高低の線の点をつまんで動かす
     def _dot_press(self, e):
@@ -938,10 +1037,11 @@ class App:
             return
         self._set_accent(ph, target)
 
-    def _acc_bg(self, x1, x2, y, row):
+    def _acc_bg(self, x1, x2, y, row, ptag=""):
         """文節のまとまりを、薄い背景で示す"""
         if x2 > x1:
-            r = self.acc_cv.create_rectangle(x1 - 1, y + 1, x2 + 1, y + row - self._sc(8), fill="#f4f6fa", outline="#dde2ea")
+            r = self.acc_cv.create_rectangle(x1 - 1, y + 1, x2 + 1, y + row - self._sc(8), fill="#f4f6fa", outline="#dde2ea",
+                                             tags=(ptag,) if ptag else ())
             self.acc_cv.tag_lower(r)
 
     def _acc_hover(self, tag, accented, on):
@@ -1324,16 +1424,23 @@ class App:
         self.q = tk.StringVar()
         self.q.trace_add("write", lambda *a: self._fill_dict())
         ttk.Entry(top, textvariable=self.q, width=30, font=self.f_ui).pack(side="left", padx=6)
+        self.risky_only = tk.BooleanVar(value=False)
+        ttk.Checkbutton(top, text="誤爆しやすい項目だけ", variable=self.risky_only,
+                        command=self._fill_dict).pack(side="left", padx=(8, 4))
+        self.risky_info = tk.StringVar()
+        ttk.Label(top, textvariable=self.risky_info, foreground=MSG_STYLE["warn"]["fg"]).pack(side="left")
         ttk.Button(top, text="数字の読み表を開く", command=self.open_numbers).pack(side="right")
         ttk.Button(top, text="読み表を再読み込み", command=self.reload_numbers).pack(side="right", padx=6)
 
-        cols = ("src", "dst", "head", "hits", "added", "note")
+        cols = ("src", "dst", "head", "hits", "added", "warn", "note")
         tv = ttk.Treeview(tab, columns=cols, show="headings", selectmode="extended")
-        for c, w, txt in (("src", 300, "YMM4側"), ("dst", 300, "置き換え後"), ("head", 70, "句頭のみ"),
-                          ("hits", 70, "使用回数"), ("added", 100, "登録日"), ("note", 160, "メモ")):
+        for c, w, txt in (("src", 260, "YMM4側"), ("dst", 260, "置き換え後"), ("head", 70, "句頭のみ"),
+                          ("hits", 70, "使用回数"), ("added", 100, "登録日"), ("warn", 230, "注意（誤爆しやすい）"),
+                          ("note", 140, "メモ")):
             tv.heading(c, text=txt, command=lambda c=c: self._sort_dict(c))
             tv.column(c, width=w, anchor="center" if c in ("head", "hits", "added") else "w",
-                      stretch=c in ("src", "dst", "note"))
+                      stretch=c in ("src", "dst", "note", "warn"))
+        tv.tag_configure("risky", foreground=MSG_STYLE["warn"]["fg"])
         tv.pack(fill="both", expand=True, pady=6)
         tv.bind("<Double-1>", lambda e: self.edit_entry())
         tv.bind("<Delete>", lambda e: self.delete_entries())
@@ -1358,13 +1465,22 @@ class App:
         tv = self.dict_tv
         tv.delete(*tv.get_children())
         q = core.normalize(self.q.get()) if hasattr(self, "q") else ""
+        warns = {e.src: core.entry_warnings(e) for e in self.dic.entries}
         key = {"src": lambda e: e.src, "dst": lambda e: e.dst, "head": lambda e: not e.head_only,
-               "hits": lambda e: -e.hits, "added": lambda e: e.added, "note": lambda e: e.note}[self._sort_key]
+               "hits": lambda e: -e.hits, "added": lambda e: e.added, "note": lambda e: e.note,
+               "warn": lambda e: (not warns[e.src], e.src)}[self._sort_key]
+        only = hasattr(self, "risky_only") and self.risky_only.get()
         for e in sorted(self.dic.entries, key=key):
             if q and q not in e.src and q not in e.dst and q not in e.note:
                 continue
+            if only and not warns[e.src]:
+                continue
             tv.insert("", "end", iid=e.src, values=(e.src, e.dst, "○" if e.head_only else "",
-                                                     e.hits or "", e.added, e.note))
+                                                     e.hits or "", e.added, "・".join(warns[e.src]), e.note),
+                      tags=("risky",) if warns[e.src] else ())
+        if hasattr(self, "risky_info"):
+            n = sum(1 for v in warns.values() if v)
+            self.risky_info.set(f"{n} 件" if n else "")
         self._refresh_status()
 
     def add_entry(self):
@@ -1435,17 +1551,50 @@ class App:
         w.transient(self.root)
         ttk.Label(w, text="戻したい時点を選んでください（新しい順）。今の辞書も、戻す前にバックアップに残します。",
                   padding=(10, 8)).pack(anchor="w")
-        lb = tk.Listbox(w, height=12, width=46, font=self.fonts["ui"], activestyle="none")
+        lb = tk.Listbox(w, height=10, width=64, font=self.fonts["ui"], activestyle="none", exportselection=False)
         lb.pack(fill="both", expand=True, padx=10)
+        ttk.Label(w, text="この時点に戻すと、今の辞書がこう変わります：", padding=(10, 6, 10, 2)).pack(anchor="w")
+        det = tk.Text(w, height=8, width=64, font=self.fonts["ui"], wrap="none", relief="solid", bd=1)
+        det.pack(fill="both", expand=True, padx=10)
+        for tg, col in (("add", "#2a7a2a"), ("del", MSG_STYLE["crit"]["fg"]), ("chg", MSG_STYLE["warn"]["fg"])):
+            det.tag_configure(tg, foreground=col)
+        diffs = []
         for p in files:
             m = re.search(r"(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})(\d{2})", os.path.basename(p))
             when = f"{m[1]}/{m[2]}/{m[3]} {m[4]}:{m[5]}:{m[6]}" if m else os.path.basename(p)
             try:
-                n = f"{len(core.Dictionary.load(p).entries)} 件"
+                d = core.Dictionary.load(p)
+                diff = core.dict_diff(self.dic, d)
+                a, r, c = (len(x) for x in diff)
+                summary = "今と同じ" if not (a or r or c) else f"戻すと：＋{a}　－{r}　変更{c}"
+                lb.insert("end", f"{when}　　{len(d.entries)} 件　　（{summary}）")
             except Exception:
-                n = "読めません"
-            lb.insert("end", f"{when}　　{n}")
+                diff = None
+                lb.insert("end", f"{when}　　読めません")
+            diffs.append(diff)
+
+        def show(_e=None):
+            sel = lb.curselection()
+            det.configure(state="normal")
+            det.delete("1.0", "end")
+            diff = diffs[sel[0]] if sel else None
+            if diff is None:
+                det.insert("end", "このバックアップは読めません。" if sel else "")
+            else:
+                add, rem, chg = diff
+                lines = ([("add", f"＋ 増える：{e.src} → {e.dst}") for e in add]
+                         + [("del", f"－ 消える：{e.src} → {e.dst}") for e in rem]
+                         + [("chg", f"△ 変わる：{a_.src}：{a_.dst} → {b_.dst}") for a_, b_ in chg])
+                if not lines:
+                    det.insert("end", "今の辞書と同じです（戻しても変わりません）。")
+                for tg, line in lines[:300]:
+                    det.insert("end", line + "\n", tg)
+                if len(lines) > 300:
+                    det.insert("end", f"…ほか {len(lines) - 300} 件")
+            det.configure(state="disabled")
+        lb.bind("<<ListboxSelect>>", show)
         lb.selection_set(0)
+        show()
 
         def do_restore():
             sel = lb.curselection()
