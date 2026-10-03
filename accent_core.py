@@ -1334,3 +1334,115 @@ def check_location(base_dir: str, env: dict | None = None, temp_dir: str = "",
     if sync:
         out.append(("warn", "sync:" + sync))
     return out
+
+
+# ─────────────────────────────────────────────
+# 文節の突き合わせ（右クリックの「変換直後に戻す」など）
+# ─────────────────────────────────────────────
+def _skeleton(s: str) -> tuple[str, list[int]]:
+    """記号（' / , + ; 、 。 ？ _ 改行）を除いた仮名などの並びと、その元の位置。カタカナはひらがなにそろえる。"""
+    chars, pos = [], []
+    for i, c in enumerate(s):
+        if c in MARKS or c in PUNCT or c in "\n" or c == DEVOICE or c in SPACES:
+            continue
+        chars.append(to_hira(c))
+        pos.append(i)
+    return "".join(chars), pos
+
+
+def _phrase_spans(s: str) -> list[tuple[int, int]]:
+    return [(p.start, p.end) for p in split_phrases(s) if isinstance(p, Phrase) and p.end > p.start]
+
+
+def _expand(spans: list[tuple[int, int]], a: int, b: int) -> tuple[int, int]:
+    """[a, b) に重なる文節をすべて含むように広げる"""
+    hit = [(s, e) for s, e in spans if s < b and a < e] or [(s, e) for s, e in spans if s <= a <= e]
+    return (min(s for s, _ in hit), max(e for _, e in hit)) if hit else (a, b)
+
+
+def phrase_region(cur: str, ref: str, start: int, end: int) -> tuple[int, int, int, int] | None:
+    """cur の文節 [start, end) に当たる ref 側の範囲を探す。記号を除いた仮名の並びで突き合わせるので、
+    アクセントや区切りを変えていても対応がとれる。区切りの付け外しで文節の数が違うときは、
+    両方を文節の切れ目まで広げて、まとめて対応させる。戻り値: (cur の始め, 終わり, ref の始め, 終わり)"""
+    sc, pc = _skeleton(cur)
+    sr, pr = _skeleton(ref)
+    if not sc or not sr:
+        return None
+    ops = difflib.SequenceMatcher(None, sc, sr, autojunk=False).get_opcodes()
+    cur_sp, ref_sp = _phrase_spans(cur), _phrase_spans(ref)
+
+    def to_sk(pos, a, b):          # 文字の範囲 → 骨組みの範囲
+        idx = [k for k, p in enumerate(pos) if a <= p < b]
+        return (idx[0], idx[-1] + 1) if idx else None
+
+    def to_chars(pos, rng):        # 骨組みの範囲 → 文字の範囲
+        return pos[rng[0]], pos[rng[1] - 1] + 1
+
+    def across(rng, forward):      # 骨組みの範囲を、相手側の骨組みの範囲へ
+        a, b = rng
+        lo, hi = None, None
+        for tag, i1, i2, j1, j2 in ops:
+            s1, e1, s2, e2 = (i1, i2, j1, j2) if forward else (j1, j2, i1, i2)
+            if tag == "equal":
+                ov_a, ov_b = max(a, s1), min(b, e1)
+                if ov_a < ov_b:
+                    na, nb = s2 + (ov_a - s1), s2 + (ov_b - s1)
+                    lo, hi = (na if lo is None else min(lo, na)), (nb if hi is None else max(hi, nb))
+            elif (s1 < b and a < e1) or (s1 == e1 and a < s1 < b):
+                if e2 > s2:
+                    lo, hi = (s2 if lo is None else min(lo, s2)), (e2 if hi is None else max(hi, e2))
+        return (lo, hi) if lo is not None else None
+
+    cs, ce = _expand(cur_sp, start, end)
+    for _ in range(6):
+        k = to_sk(pc, cs, ce)
+        r = across(k, True) if k else None
+        if not r:
+            return None
+        rs, re_ = _expand(ref_sp, *to_chars(pr, r))
+        back = across(to_sk(pr, rs, re_), False)
+        ncs, nce = _expand(cur_sp, *to_chars(pc, back)) if back else (cs, ce)
+        ncs, nce = min(ncs, cs), max(nce, ce)
+        if (ncs, nce) == (cs, ce):
+            return cs, ce, rs, re_
+        cs, ce = ncs, nce
+    return cs, ce, rs, re_
+
+
+# ─────────────────────────────────────────────
+# 誤爆しやすい辞書の項目
+# ─────────────────────────────────────────────
+PARTICLE_CHARS = set("わがをにのでともへや")
+
+
+def mora_count(s: str) -> int:
+    """拍の数（小さい ゃゅょ などは前とまとめて1拍、ー・っ・ん は1拍。記号は数えない）"""
+    return sum(1 for c in s if (is_hira(c) or is_kata(c) or c == "ー") and c not in SMALL_KANA)
+
+
+def entry_warnings(e: Entry) -> list[str]:
+    """辞書の項目のうち、ほかの所でも当たってしまいそうなもの（誤爆しやすいもの）の理由。
+    辞書は文章のどこでも当たるので、短い語や助詞がらみの語は、長い語の中でも置き換わりやすい。"""
+    plain = "".join(c for c in e.src if c not in MARKS and c not in PUNCT and c != DEVOICE)
+    n = mora_count(plain)
+    out = []
+    if plain in PARTICLES:
+        out.append("助詞だけ")
+    elif n <= 2 and not e.head_only:
+        out.append(f"短い（{n}拍）")
+    if n <= 3 and not e.head_only and plain not in PARTICLES:
+        if "わ" in plain:
+            out.append("「わ」を含む（助詞の「は」と紛れやすい）")
+        elif plain and (plain[0] in PARTICLE_CHARS or plain[-1] in PARTICLE_CHARS):
+            out.append("助詞と同じ文字で始まる／終わる短い語")
+    return out
+
+
+def dict_diff(now: "Dictionary", other: "Dictionary") -> tuple[list[Entry], list[Entry], list[tuple[Entry, Entry]]]:
+    """now を other に置き換えたら、どう変わるか: (増える項目, 消える項目, 変わる項目[(今, 置き換え後)])"""
+    a = {e.src: e for e in now.entries}
+    b = {e.src: e for e in other.entries}
+    added = [b[k] for k in sorted(b) if k not in a]
+    removed = [a[k] for k in sorted(a) if k not in b]
+    changed = [(a[k], b[k]) for k in sorted(a) if k in b and (a[k].dst, a[k].head_only) != (b[k].dst, b[k].head_only)]
+    return added, removed, changed
