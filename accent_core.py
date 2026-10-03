@@ -624,6 +624,16 @@ def ctx_label(before: str, after: str) -> str:
     return "／".join(parts)
 
 
+def entry_priority(e: "Entry"):
+    """同じ位置で当たりうる項目を試す順番（小さいほど先）。辞書が育っても結果が変わらないよう、ここで固定する。
+    1. YMM4側が長い項目（最長一致）
+    2. 前後両方の条件 → 片側だけの条件 → 条件なし
+    3. 同じ段なら、条件の文字が長い方（記号を除いた仮名の数）
+    4. それでも同じなら、辞書の保存順（YMM4側・前・後の並び。登録した順番には左右されない）"""
+    sides = bool(e.before) + bool(e.after)
+    return (-len(e.src), -sides, -(len(ctx_plain(e.before)) + len(ctx_plain(e.after))), e.key)
+
+
 class Dictionary:
     FORMAT = "yukkuri-accent-dict"
 
@@ -702,8 +712,7 @@ class Dictionary:
             if e.src:
                 idx.setdefault(e.src[0], []).append(e)
         for v in idx.values():
-            # 長い語から。同じ長さなら、前後の条件が付いた項目（より限られた所）を先に試す
-            v.sort(key=lambda e: (-len(e.src), -(len(e.before) + len(e.after))))
+            v.sort(key=entry_priority)
         self._index = idx
 
     def apply(self, s: str) -> tuple[str, list[Applied]]:
