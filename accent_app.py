@@ -949,6 +949,7 @@ class App:
         add_restore("この文節を変換直後に戻す", self._out_converted, "変換直後の形に戻しました")
         add_restore("この文節を辞書適用前に戻す", self._out_prepared, "辞書を当てる前の形に戻しました")
         m.add_separator()
+        m.add_command(label="この文節を辞書に登録…", command=lambda: self._register_phrase(ph))
         m.add_command(label="この文節を学習候補に送る", command=lambda: self._learn_phrase(ph))
         try:
             m.tk_popup(e.x_root, e.y_root)
@@ -965,6 +966,47 @@ class App:
         t.edit_separator()
         self._show_issues(core.validate(t.get("1.0", "end-1c")))
         self._refresh_status(f"「{self._short(old, 20)}」を{done}：{self._short(new, 30)}（Ctrl+Z で元に戻せます）")
+
+    def _register_phrase(self, ph):
+        """この文節の手直しを、辞書の追加画面に入れて開く（YMM4側＝辞書を当てる前の形、置き換え後＝今の文節）"""
+        if not self._out_prepared:
+            self._refresh_status([("辞書に登録するには、", None), ("先に①に YMM4 の読みを貼って［変換］してください", "warn")])
+            return
+        cur = self.out_text.get("1.0", "end-1c")
+        r = core.phrase_region(cur, self._out_prepared, ph.start, ph.end)
+        if not r:
+            self._refresh_status([("この文節に当たる、変換前の読みが見つかりませんでした", "warn"),
+                                  ("（文字そのものを大きく書き換えた所かもしれません）。辞書タブの［追加］から登録できます", None)])
+            return
+        cs, ce, rs, re_ = r
+        src, dst = self._out_prepared[rs:re_], cur[cs:ce]
+        if core.normalize(src) == core.normalize(dst):
+            self._refresh_status("この文節は、辞書を当てる前の形と同じなので、登録する手直しがありません")
+            return
+        old = self.dic.find(core.normalize(src))
+        res = EntryDialog(self.root, self, "この文節を辞書に登録", src, dst,
+                          old.head_only if old else False, old.note if old else "").result
+        if not res:
+            return
+        src2, dst2, head, note = res
+        old = self.dic.find(core.normalize(src2))
+        if old and (old.dst, old.head_only) != (core.normalize(dst2), head):
+            if not messagebox.askyesno(APP_NAME, f"同じ「YMM4側」の項目があります。\n今：{old.src} → {old.dst}\n"
+                                                 f"新：{core.normalize(src2)} → {core.normalize(dst2)}\n\n上書きしますか？"):
+                return
+            self._backup_dict()                 # 上書きの前に写しておく
+        kind = self.dic.upsert(src2, dst2, head, note)
+        e = self.dic.find(core.normalize(src2))
+        if e and note:
+            e.note = note
+        self.save_dict()
+        self._fill_dict()
+        done = {"added": "辞書に登録しました", "updated": "辞書を上書きしました", "same": "同じ項目がもう辞書にあります"}[kind]
+        parts = [(f"{done}：{self._short(e.src, 24)} → {self._short(e.dst, 30)}", None)]
+        warns = core.entry_warnings(e) if e else []
+        if warns:
+            parts.append((f"\n誤爆しやすい形です（{'・'.join(warns)}）。ほかの所で困ったら、辞書タブで「句頭のみ」を付けてください", "warn"))
+        self._refresh_status(parts)
 
     def _learn_phrase(self, ph):
         if not self._raw_converted:
