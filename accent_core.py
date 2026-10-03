@@ -558,9 +558,20 @@ class Entry:
     note: str = ""
     added: str = ""
     hits: int = 0
+    before: str = ""         # 文脈の条件: 直前がこれで終わるときだけ当てる（空なら条件なし）
+    after: str = ""          # 文脈の条件: 直後がこれで始まるときだけ当てる（空なら条件なし）
+
+    @property
+    def key(self) -> tuple[str, str, str]:
+        """同じ YMM4側でも、前後の条件が違えば別の項目"""
+        return self.src, self.before, self.after
 
     def to_json(self):
         d = {"from": self.src, "to": self.dst}
+        if self.before:
+            d["before"] = self.before
+        if self.after:
+            d["after"] = self.after
         if self.head_only:
             d["head_only"] = True
         if self.note:
@@ -574,7 +585,8 @@ class Entry:
     @staticmethod
     def from_json(d):
         return Entry(normalize(d["from"]), normalize(d["to"]), bool(d.get("head_only")),
-                     d.get("note", ""), d.get("added", ""), int(d.get("hits", 0)))
+                     d.get("note", ""), d.get("added", ""), int(d.get("hits", 0)),
+                     normalize(d.get("before", "")), normalize(d.get("after", "")))
 
 
 @dataclass
@@ -582,6 +594,34 @@ class Applied:
     start: int
     end: int
     entry: Entry
+
+
+CTX_IGNORE = set(ACCENT + DEVOICE + SEPS + SPACES)
+
+
+def ctx_plain(t: str) -> str:
+    """文脈の条件を比べるための形: アクセント・無声化・区切りの記号と空白を除き、カタカナはひらがなに。
+    句読点（、。？）と改行は残すので、条件は文や大きな切れ目をまたがない。"""
+    return "".join(to_hira(c) for c in t if c not in CTX_IGNORE)
+
+
+def ctx_match(e: "Entry", s: str, i: int, j: int) -> bool:
+    """s の [i, j) に e を当ててよいか（前後の条件を見る）"""
+    if e.before:
+        b = ctx_plain(e.before)
+        if not ctx_plain(s[max(0, i - 3 * len(e.before) - 8):i]).endswith(b):
+            return False
+    if e.after:
+        a = ctx_plain(e.after)
+        if not ctx_plain(s[j:j + 3 * len(e.after) + 8]).startswith(a):
+            return False
+    return True
+
+
+def ctx_label(before: str, after: str) -> str:
+    """前後の条件を画面に出す形（例: 前「これ」／後「の」）。条件がなければ空"""
+    parts = ([f"前「{before}」"] if before else []) + ([f"後「{after}」"] if after else [])
+    return "／".join(parts)
 
 
 class Dictionary:
@@ -604,23 +644,26 @@ class Dictionary:
         return d
 
     def save(self, path: str):
-        data = {"format": self.FORMAT, "version": 1, "name": self.name,
-                "entries": [e.to_json() for e in sorted(self.entries, key=lambda e: e.src)]}
+        data = {"format": self.FORMAT, "version": 2 if any(e.before or e.after for e in self.entries) else 1,
+                "name": self.name, "entries": [e.to_json() for e in sorted(self.entries, key=lambda e: e.key)]}
         tmp = path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=1)
         os.replace(tmp, path)
 
     # 編集 -----------------------------------------------------------
-    def find(self, src: str) -> Entry | None:
+    def find(self, src: str, before: str = "", after: str = "") -> Entry | None:
+        """YMM4側と前後の条件が同じ項目（条件を省くと、条件なしの項目）"""
         for e in self.entries:
-            if e.src == src:
+            if e.key == (src, before, after):
                 return e
         return None
 
-    def upsert(self, src: str, dst: str, head_only: bool = False, note: str = "") -> str:
+    def upsert(self, src: str, dst: str, head_only: bool = False, note: str = "",
+               before: str = "", after: str = "") -> str:
         src, dst = normalize(src), normalize(dst)
-        e = self.find(src)
+        before, after = normalize(before).strip(), normalize(after).strip()
+        e = self.find(src, before, after)
         self._index = None
         if e:
             if e.dst == dst and e.head_only == head_only:
@@ -629,11 +672,11 @@ class Dictionary:
             if note:
                 e.note = note
             return "updated"
-        self.entries.append(Entry(src, dst, head_only, note, _dt.date.today().isoformat()))
+        self.entries.append(Entry(src, dst, head_only, note, _dt.date.today().isoformat(), 0, before, after))
         return "added"
 
-    def remove(self, src: str):
-        self.entries = [e for e in self.entries if e.src != src]
+    def remove(self, src: str, before: str = "", after: str = ""):
+        self.entries = [e for e in self.entries if e.key != (src, before, after)]
         self._index = None
 
     def merge(self, other: "Dictionary") -> tuple[int, int]:
@@ -642,7 +685,7 @@ class Dictionary:
         added = skipped = 0
         today = _dt.date.today().isoformat()
         for e in other.entries:
-            if self.find(e.src):
+            if self.find(*e.key):
                 skipped += 1
             else:
                 ne = copy.copy(e)
@@ -659,7 +702,8 @@ class Dictionary:
             if e.src:
                 idx.setdefault(e.src[0], []).append(e)
         for v in idx.values():
-            v.sort(key=lambda e: -len(e.src))
+            # 長い語から。同じ長さなら、前後の条件が付いた項目（より限られた所）を先に試す
+            v.sort(key=lambda e: (-len(e.src), -(len(e.before) + len(e.after))))
         self._index = idx
 
     def apply(self, s: str) -> tuple[str, list[Applied]]:
@@ -673,6 +717,8 @@ class Dictionary:
             for e in self._index.get(s[i], ()):
                 if s.startswith(e.src, i):
                     if e.head_only and i > 0 and s[i - 1] not in BOUNDARY:
+                        continue
+                    if (e.before or e.after) and not ctx_match(e, s, i, i + len(e.src)):
                         continue
                     hit = e
                     break
@@ -1016,6 +1062,8 @@ class Candidate:
     head_only: bool
     status: str = "新規"  # 新規 / 登録済み / 上書き
     use: bool = True
+    before: str = ""     # 前後の条件（候補を編集して付けたとき）
+    after: str = ""
 
 
 def _tokenize(s: str, with_pos: bool = False):
@@ -1423,6 +1471,8 @@ def mora_count(s: str) -> int:
 def entry_warnings(e: Entry) -> list[str]:
     """辞書の項目のうち、ほかの所でも当たってしまいそうなもの（誤爆しやすいもの）の理由。
     辞書は文章のどこでも当たるので、短い語や助詞がらみの語は、長い語の中でも置き換わりやすい。"""
+    if e.before or e.after:
+        return []                    # 前後の条件で、当たる所が限られている
     plain = "".join(c for c in e.src if c not in MARKS and c not in PUNCT and c != DEVOICE)
     n = mora_count(plain)
     out = []
@@ -1440,8 +1490,8 @@ def entry_warnings(e: Entry) -> list[str]:
 
 def dict_diff(now: "Dictionary", other: "Dictionary") -> tuple[list[Entry], list[Entry], list[tuple[Entry, Entry]]]:
     """now を other に置き換えたら、どう変わるか: (増える項目, 消える項目, 変わる項目[(今, 置き換え後)])"""
-    a = {e.src: e for e in now.entries}
-    b = {e.src: e for e in other.entries}
+    a = {e.key: e for e in now.entries}
+    b = {e.key: e for e in other.entries}
     added = [b[k] for k in sorted(b) if k not in a]
     removed = [a[k] for k in sorted(a) if k not in b]
     changed = [(a[k], b[k]) for k in sorted(a) if k in b and (a[k].dst, a[k].head_only) != (b[k].dst, b[k].head_only)]

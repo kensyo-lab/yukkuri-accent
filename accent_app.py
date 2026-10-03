@@ -22,7 +22,7 @@ from tkinter import ttk, messagebox, filedialog
 import accent_core as core
 
 APP_NAME = "ゆっくりアクセント辞書"
-VERSION = "0.6.0"
+VERSION = "0.7.0"
 
 if getattr(sys, "frozen", False):
     BASE_DIR = os.path.dirname(sys.executable)
@@ -984,25 +984,32 @@ class App:
             self._refresh_status("この文節は、辞書を当てる前の形と同じなので、登録する手直しがありません")
             return
         old = self.dic.find(core.normalize(src))
+        # 前後の文節（辞書を当てる前の形）を、条件の候補としてボタンに出す
+        prep = self._out_prepared
+        spans = core._phrase_spans(prep)
+        prev = [prep[a:b] for a, b in spans if b <= rs and "\n" not in prep[b:rs] and "。" not in prep[b:rs]]
+        nxt = [prep[a:b] for a, b in spans if a >= re_ and "\n" not in prep[re_:a] and "。" not in prep[re_:a]]
         res = EntryDialog(self.root, self, "この文節を辞書に登録", src, dst,
-                          old.head_only if old else False, old.note if old else "").result
+                          old.head_only if old else False, old.note if old else "",
+                          suggest_before=prev[-1] if prev else "", suggest_after=nxt[0] if nxt else "").result
         if not res:
             return
-        src2, dst2, head, note = res
-        old = self.dic.find(core.normalize(src2))
+        src2, dst2, head, note, before, after = res
+        old = self.dic.find(core.normalize(src2), before, after)
         if old and (old.dst, old.head_only) != (core.normalize(dst2), head):
             if not messagebox.askyesno(APP_NAME, f"同じ「YMM4側」の項目があります。\n今：{old.src} → {old.dst}\n"
                                                  f"新：{core.normalize(src2)} → {core.normalize(dst2)}\n\n上書きしますか？"):
                 return
             self._backup_dict()                 # 上書きの前に写しておく
-        kind = self.dic.upsert(src2, dst2, head, note)
-        e = self.dic.find(core.normalize(src2))
+        kind = self.dic.upsert(src2, dst2, head, note, before, after)
+        e = self.dic.find(core.normalize(src2), before, after)
         if e and note:
             e.note = note
         self.save_dict()
         self._fill_dict()
         done = {"added": "辞書に登録しました", "updated": "辞書を上書きしました", "same": "同じ項目がもう辞書にあります"}[kind]
-        parts = [(f"{done}：{self._short(e.src, 24)} → {self._short(e.dst, 30)}", None)]
+        ctx = core.ctx_label(e.before, e.after) if e else ""
+        parts = [(f"{done}：{self._short(e.src, 24)} → {self._short(e.dst, 30)}" + (f"（条件：{ctx}）" if ctx else ""), None)]
         warns = core.entry_warnings(e) if e else []
         if warns:
             parts.append((f"\n誤爆しやすい形です（{'・'.join(warns)}）。ほかの所で困ったら、辞書タブで「句頭のみ」を付けてください", "warn"))
@@ -1406,8 +1413,10 @@ class App:
         tv = self.cand_tv
         tv.delete(*tv.get_children())
         for i, c in enumerate(self.cands):
+            ctx = core.ctx_label(c.before, c.after)
             tv.insert("", "end", iid=str(i), values=(
-                "☑" if c.use else "☐", c.kind, c.src, c.dst, "○" if c.head_only else "", c.status))
+                "☑" if c.use else "☐", c.kind, f"{c.src}　［{ctx}］" if ctx else c.src, c.dst,
+                "○" if c.head_only else "", c.status))
 
     def _check_all(self, v):
         for c in self.cands:
@@ -1439,9 +1448,9 @@ class App:
         if not iid or col in ("#1", "#5"):
             return
         c = self.cands[int(iid)]
-        r = EntryDialog(self.root, self, "候補を編集", c.src, c.dst, c.head_only, "").result
+        r = EntryDialog(self.root, self, "候補を編集", c.src, c.dst, c.head_only, "", c.before, c.after).result
         if r:
-            c.src, c.dst, c.head_only, _ = r
+            c.src, c.dst, c.head_only, _, c.before, c.after = r
             c.use = True
             self._fill_cands()
 
@@ -1449,7 +1458,7 @@ class App:
         cnt = {"added": 0, "updated": 0, "same": 0}
         for c in self.cands:
             if c.use:
-                cnt[self.dic.upsert(c.src, c.dst, c.head_only)] += 1
+                cnt[self.dic.upsert(c.src, c.dst, c.head_only, before=c.before, after=c.after)] += 1
         self.save_dict()
         self.cands = [c for c in self.cands if not c.use]
         self._fill_cands()
@@ -1474,14 +1483,15 @@ class App:
         ttk.Button(top, text="数字の読み表を開く", command=self.open_numbers).pack(side="right")
         ttk.Button(top, text="読み表を再読み込み", command=self.reload_numbers).pack(side="right", padx=6)
 
-        cols = ("src", "dst", "head", "hits", "added", "warn", "note")
+        cols = ("src", "dst", "ctx", "head", "hits", "added", "warn", "note")
         tv = ttk.Treeview(tab, columns=cols, show="headings", selectmode="extended")
-        for c, w, txt in (("src", 260, "YMM4側"), ("dst", 260, "置き換え後"), ("head", 70, "句頭のみ"),
+        for c, w, txt in (("src", 220, "YMM4側"), ("dst", 220, "置き換え後"), ("ctx", 170, "条件（前／後）"),
+                          ("head", 70, "句頭のみ"),
                           ("hits", 70, "使用回数"), ("added", 100, "登録日"), ("warn", 230, "注意（誤爆しやすい）"),
                           ("note", 140, "メモ")):
             tv.heading(c, text=txt, command=lambda c=c: self._sort_dict(c))
             tv.column(c, width=w, anchor="center" if c in ("head", "hits", "added") else "w",
-                      stretch=c in ("src", "dst", "note", "warn"))
+                      stretch=c in ("src", "dst", "note", "warn", "ctx"))
         tv.tag_configure("risky", foreground=MSG_STYLE["warn"]["fg"])
         tv.pack(fill="both", expand=True, pady=6)
         tv.bind("<Double-1>", lambda e: self.edit_entry())
@@ -1507,49 +1517,54 @@ class App:
         tv = self.dict_tv
         tv.delete(*tv.get_children())
         q = core.normalize(self.q.get()) if hasattr(self, "q") else ""
-        warns = {e.src: core.entry_warnings(e) for e in self.dic.entries}
-        key = {"src": lambda e: e.src, "dst": lambda e: e.dst, "head": lambda e: not e.head_only,
+        warns = {e.key: core.entry_warnings(e) for e in self.dic.entries}
+        key = {"src": lambda e: e.key, "dst": lambda e: e.dst, "head": lambda e: not e.head_only,
                "hits": lambda e: -e.hits, "added": lambda e: e.added, "note": lambda e: e.note,
-               "warn": lambda e: (not warns[e.src], e.src)}[self._sort_key]
+               "warn": lambda e: (not warns[e.key], e.key),
+               "ctx": lambda e: (not (e.before or e.after), e.key)}[self._sort_key]
         only = hasattr(self, "risky_only") and self.risky_only.get()
-        for e in sorted(self.dic.entries, key=key):
-            if q and q not in e.src and q not in e.dst and q not in e.note:
+        self._row_keys = {}          # 行の id → (YMM4側, 前, 後)。同じ YMM4側でも条件違いは別の行
+        for n, e in enumerate(sorted(self.dic.entries, key=key)):
+            if q and not any(q in x for x in (e.src, e.dst, e.note, e.before, e.after)):
                 continue
-            if only and not warns[e.src]:
+            if only and not warns[e.key]:
                 continue
-            tv.insert("", "end", iid=e.src, values=(e.src, e.dst, "○" if e.head_only else "",
-                                                     e.hits or "", e.added, "・".join(warns[e.src]), e.note),
-                      tags=("risky",) if warns[e.src] else ())
+            iid = f"k{n}"
+            self._row_keys[iid] = e.key
+            tv.insert("", "end", iid=iid, values=(e.src, e.dst, core.ctx_label(e.before, e.after),
+                                                   "○" if e.head_only else "", e.hits or "", e.added,
+                                                   "・".join(warns[e.key]), e.note),
+                      tags=("risky",) if warns[e.key] else ())
         if hasattr(self, "risky_info"):
-            n = sum(1 for v in warns.values() if v)
-            self.risky_info.set(f"{n} 件" if n else "")
+            n_risky = sum(1 for v in warns.values() if v)
+            self.risky_info.set(f"{n_risky} 件" if n_risky else "")
         self._refresh_status()
 
     def add_entry(self):
         r = EntryDialog(self.root, self, "辞書に追加", "", "", False, "").result
         if r:
-            src, dst, head, note = r
-            if self.dic.find(core.normalize(src)) and not messagebox.askyesno(
-                    APP_NAME, "同じ「YMM4側」の項目があります。上書きしますか？"):
+            src, dst, head, note, before, after = r
+            if self.dic.find(core.normalize(src), before, after) and not messagebox.askyesno(
+                    APP_NAME, "同じ「YMM4側」で同じ条件の項目があります。上書きしますか？"):
                 return
-            self.dic.upsert(src, dst, head, note)
+            self.dic.upsert(src, dst, head, note, before, after)
             self.save_dict()
             self._fill_dict()
 
     def edit_entry(self):
         sel = self.dict_tv.selection()
-        if not sel:
+        if not sel or sel[0] not in self._row_keys:
             return
-        e = self.dic.find(sel[0])
+        e = self.dic.find(*self._row_keys[sel[0]])
         if not e:
             return
-        r = EntryDialog(self.root, self, "辞書を編集", e.src, e.dst, e.head_only, e.note).result
+        r = EntryDialog(self.root, self, "辞書を編集", e.src, e.dst, e.head_only, e.note, e.before, e.after).result
         if r:
-            src, dst, head, note = r
-            if core.normalize(src) != e.src:
-                self.dic.remove(e.src)
-            self.dic.upsert(src, dst, head, note)
-            ne = self.dic.find(core.normalize(src))
+            src, dst, head, note, before, after = r
+            if (core.normalize(src), before, after) != e.key:
+                self.dic.remove(*e.key)
+            self.dic.upsert(src, dst, head, note, before, after)
+            ne = self.dic.find(core.normalize(src), before, after)
             if ne:
                 ne.note = note
             self.save_dict()
@@ -1561,7 +1576,8 @@ class App:
             return
         self._backup_dict()
         for s in sel:
-            self.dic.remove(s)
+            if s in self._row_keys:
+                self.dic.remove(*self._row_keys[s])
         self.save_dict()
         self._fill_dict()
 
@@ -1876,7 +1892,8 @@ class App:
 class EntryDialog:
     """辞書項目の入力ダイアログ。入力は全角/半角どちらでもOK（保存時にそろえる）。"""
 
-    def __init__(self, root, app: App, title, src, dst, head, note):
+    def __init__(self, root, app: App, title, src, dst, head, note, before="", after="",
+                 suggest_before="", suggest_after=""):
         self.result = None
         w = tk.Toplevel(root)
         w.title(title)
@@ -1887,20 +1904,34 @@ class EntryDialog:
         pad = {"padx": 8, "pady": 5}
         ttk.Label(w, text="YMM4側（置き換え前）").grid(row=0, column=0, sticky="w", **pad)
         ttk.Label(w, text="置き換え後").grid(row=1, column=0, sticky="w", **pad)
-        ttk.Label(w, text="メモ").grid(row=3, column=0, sticky="w", **pad)
+        ttk.Label(w, text="メモ").grid(row=6, column=0, sticky="w", **pad)
         self.v_src, self.v_dst = tk.StringVar(value=src), tk.StringVar(value=dst)
         self.v_head, self.v_note = tk.BooleanVar(value=head), tk.StringVar(value=note)
+        self.v_before, self.v_after = tk.StringVar(value=before), tk.StringVar(value=after)
         e1 = ttk.Entry(w, textvariable=self.v_src, font=app.f_entry, width=36)
         e2 = ttk.Entry(w, textvariable=self.v_dst, font=app.f_entry, width=36)
         e1.grid(row=0, column=1, sticky="ew", **pad)
         e2.grid(row=1, column=1, sticky="ew", **pad)
         ttk.Checkbutton(w, text="句の頭でだけ置き換える（短い語の誤爆よけ）",
                         variable=self.v_head).grid(row=2, column=1, sticky="w", **pad)
-        ttk.Entry(w, textvariable=self.v_note, width=36).grid(row=3, column=1, sticky="ew", **pad)
+        # 文脈の条件（前の語・後ろの語）。右クリックから開いたときは、前後の文節をボタン一つで入れられる
+        for row, label, var, sug in ((3, "条件：直前が", self.v_before, suggest_before),
+                                     (4, "条件：直後が", self.v_after, suggest_after)):
+            ttk.Label(w, text=label).grid(row=row, column=0, sticky="w", **pad)
+            fr = ttk.Frame(w)
+            fr.grid(row=row, column=1, sticky="ew", **pad)
+            ttk.Entry(fr, textvariable=var, font=app.f_entry, width=18).pack(side="left", fill="x", expand=True)
+            if sug:
+                ttk.Button(fr, text=f"「{sug}」を入れる", command=lambda v=var, t=sug: v.set(t)).pack(side="left", padx=(6, 0))
+            ttk.Button(fr, text="消す", width=5, command=lambda v=var: v.set("")).pack(side="left", padx=(4, 0))
+        ttk.Label(w, text="前後の条件を入れると、その語の直前・直後がこうなっているときだけ置き換えます"
+                          "（アクセントや区切りの記号は無視して比べます。空なら条件なし）。は／わ や、同じ読みの別の言葉の誤爆よけに。",
+                  foreground="#666", wraplength=app._sc(460), justify="left").grid(row=5, column=1, sticky="w", padx=8)
+        ttk.Entry(w, textvariable=self.v_note, width=36).grid(row=6, column=1, sticky="ew", **pad)
         self.msg = tk.StringVar()
-        ttk.Label(w, textvariable=self.msg, foreground="#a05a00").grid(row=4, column=0, columnspan=2, sticky="w", **pad)
+        ttk.Label(w, textvariable=self.msg, foreground="#a05a00").grid(row=7, column=0, columnspan=2, sticky="w", **pad)
         bf = ttk.Frame(w)
-        bf.grid(row=5, column=0, columnspan=2, sticky="e", **pad)
+        bf.grid(row=8, column=0, columnspan=2, sticky="e", **pad)
         ttk.Button(bf, text="OK", command=self.ok).pack(side="left", padx=4)
         ttk.Button(bf, text="キャンセル", command=w.destroy).pack(side="left")
         self.v_dst.trace_add("write", lambda *a: self._check())
@@ -1926,7 +1957,8 @@ class EntryDialog:
         if not src or not dst:
             self.msg.set("両方入力してください")
             return
-        self.result = (src, dst, bool(self.v_head.get()), self.v_note.get().strip())
+        self.result = (src, dst, bool(self.v_head.get()), self.v_note.get().strip(),
+                       core.normalize(self.v_before.get()).strip(), core.normalize(self.v_after.get()).strip())
         self.w.destroy()
 
 
