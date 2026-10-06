@@ -23,7 +23,7 @@ from tkinter import ttk, messagebox, filedialog
 import accent_core as core
 
 APP_NAME = "ゆっくりアクセント辞書"
-VERSION = "0.7.3"
+VERSION = "0.8.0"
 
 if getattr(sys, "frozen", False):
     BASE_DIR = os.path.dirname(sys.executable)
@@ -41,6 +41,9 @@ NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 COL_APPLIED = "#fff2b3"
 COL_ERROR = "#ffb3b3"
 COL_WARN = "#ffd9a6"
+COL_UNCHECKED = "#dfe9f7"      # まだ誰も触っていない文節（耳で確かめたい所）
+COL_MANUAL = "#dcefd9"         # 手で直した文節
+COL_RISKY_LINE = "#c0392b"     # 誤爆しやすい辞書が当たった所の下線
 COL_MK_ACCENT = "#d0342c"      # ' アクセント
 COL_MK_SEP = "#8a8f98"         # / , + ; 区切り
 COL_MK_DEVOICE = "#1f5fbf"     # _ 無声化
@@ -84,6 +87,8 @@ SHORTCUTS = [
     ("vol_down", "試聴の音量を下げる", ""),
     ("vol_up", "試聴の音量を上げる", ""),
     ("accent_panel", "アクセント編集を開く／閉じる", "<Key-F8>"),
+    ("next_unchecked", "次の未確認の文節へ", "<Key-F11>"),
+    ("prev_unchecked", "前の未確認の文節へ", "<Shift-Key-F11>"),
     ("acc_left", "アクセントを前の文字へ（カーソルのある文節）", "<Alt-Key-Left>"),
     ("acc_right", "アクセントを後ろの文字へ（カーソルのある文節）", "<Alt-Key-Right>"),
     ("acc_here", "カーソルの前の文字にアクセント", "<Alt-Key-Up>"),
@@ -165,6 +170,10 @@ class App:
         self._out_prepared = ""    # 同じく、辞書を当てる前の形（「辞書適用前に戻す」用）
         self._raw_converted = ""   # 同じく、変換に使った YMM4 の読み（「学習候補に送る」用）
         self._out_sent = None      # 最後に学習タブへ送った変換結果
+        self._ap_tags: dict[str, core.Entry] = {}   # 辞書が当たった所のタグ名 → 当たった項目（タグは手直ししても文字に付いて動く）
+        self._infos: list[core.PhraseInfo] = []     # 変換結果の文節ごとの状態
+        self._insight_job = None
+        self.phrase_colors = tk.BooleanVar(value=self.conf.get("phrase_colors", True))
 
         nb = ttk.Notebook(root)
         nb.pack(fill="both", expand=True, padx=8, pady=(8, 0))
@@ -246,6 +255,7 @@ class App:
         self.conf["volume"] = self.volume
         self.conf["muted"] = self.muted
         self.conf["auto_watch"] = bool(self.auto_watch.get())
+        self.conf["phrase_colors"] = bool(self.phrase_colors.get())
         try:
             with open(CONF_PATH, "w", encoding="utf-8") as f:
                 json.dump(self.conf, f, ensure_ascii=False, indent=1)
@@ -409,6 +419,8 @@ class App:
             "mute": self.toggle_mute,
             "vol_down": lambda: self.change_volume(-1), "vol_up": lambda: self.change_volume(1),
             "accent_panel": self.toggle_accent_panel,
+            "next_unchecked": lambda: self.goto_unchecked(False),
+            "prev_unchecked": lambda: self.goto_unchecked(True),
             "acc_left": lambda: self.move_accent(-1), "acc_right": lambda: self.move_accent(1),
             "acc_here": self.accent_at_cursor, "acc_clear": self.clear_accent,
             "send_learn": self.send_to_learn,
@@ -536,6 +548,7 @@ class App:
             t.after_idle(lambda: self._paint_marks(t))
             if t is getattr(self, "out_text", None):
                 t.after_idle(self._draw_accent_panel)
+                self._schedule_insight()
 
     def _fix_marks(self, t):
         """全角の ’ ＿ ／ などを、打ったそばから AquesTalk の形（半角）に直す。YMM4 は全角を受け付けないため"""
@@ -600,13 +613,32 @@ class App:
         tk.Label(lab, text=" 辞書で置き換えた所 ", bg=COL_APPLIED, fg="black", font=self.f_ui).pack(side="right")
         tk.Label(lab, text=" 注意 ", bg=COL_WARN, fg="black", font=self.f_ui).pack(side="right", padx=4)
         tk.Label(lab, text=" エラー ", bg=COL_ERROR, fg="black", font=self.f_ui).pack(side="right")
+        tk.Label(lab, text=" 手直し ", bg=COL_MANUAL, fg="black", font=self.f_ui).pack(side="right", padx=(0, 4))
+        tk.Label(lab, text=" 未確認 ", bg=COL_UNCHECKED, fg="black", font=self.f_ui).pack(side="right", padx=4)
         frm, self.out_text = self._text(tab, 5)
         self.out_text.bind("<Button-3>", self._out_right_click)
         frm.pack(fill="both", expand=True, pady=(4, 6))
+        # 文節の状態の色（いちばん下）→ 辞書で置き換えた所 → 注意 → エラー → 選択 の順に上へ重ねる
+        self.out_text.tag_configure("ph_unchecked", background=COL_UNCHECKED)
+        self.out_text.tag_configure("ph_manual", background=COL_MANUAL)
+        try:
+            self.out_text.tag_configure("ph_risky", underline=True, underlinefg=COL_RISKY_LINE)
+        except tk.TclError:      # 下線の色を変えられない古い Tk
+            self.out_text.tag_configure("ph_risky", underline=True)
         self.out_text.tag_configure("applied", background=COL_APPLIED)
         self.out_text.tag_configure("warn", background=COL_WARN)
         self.out_text.tag_configure("error", background=COL_ERROR)
         self.out_text.tag_raise("sel")
+        self.out_text.bind("<ButtonRelease-1>", self._out_click, add="+")
+
+        # 今回の変換で何が起きたか（使われた辞書・未確認の文節）
+        ins = ttk.Frame(tab)
+        ins.pack(fill="x", pady=(0, 6))
+        self.insight = tk.StringVar(value="［変換］すると、使われた辞書と、まだ確かめていない文節の数をここに出します")
+        ttk.Label(ins, textvariable=self.insight).pack(side="left")
+        self._hint("next_unchecked", ttk.Button(ins, command=lambda: self.goto_unchecked(False)),
+                   "次の未確認へ ▶").pack(side="right", padx=6)
+        ttk.Button(ins, text="使われた辞書…", command=self.show_used_entries).pack(side="right")
 
         bot = ttk.Frame(tab)
         bot.pack(fill="x")
@@ -674,8 +706,16 @@ class App:
         self._out_converted = res.text
         self._out_prepared = core.prepare(raw, self.numbers)
         self._raw_converted = raw
-        for a in res.applied:
+        for tag in self._ap_tags:
+            self.out_text.tag_delete(tag)
+        self._ap_tags = {}
+        self.out_text.tag_remove("checked", "1.0", "end")
+        for i, a in enumerate(res.applied):
+            tag = f"ap{i}"     # 1か所ごとに名前を付けて、どの項目が当たったかを後から引けるようにする
+            self._ap_tags[tag] = a.entry
             self.out_text.tag_add("applied", f"1.0+{a.start}c", f"1.0+{a.end}c")
+            self.out_text.tag_add(tag, f"1.0+{a.start}c", f"1.0+{a.end}c")
+        self._update_insight()
         self._show_issues(res.issues)
         if self.auto_copy.get() and res.text:
             self._copy(res.text)
@@ -1012,7 +1052,21 @@ class App:
         word = cur[ph.start:ph.end]
         m = tk.Menu(self.root, tearoff=0, font=self.fonts["ui"])
         m.add_command(label=f"文節「{self._short(word, 16)}」", state="disabled")
+        info = next((p for p in self._infos if p.start == ph.start and p.end == ph.end), None)
+        if info:
+            m.add_command(label=f"状態：{core.PHRASE_STATUS[info.status]}", state="disabled")
+            for e in info.entries[:3]:
+                m.add_command(label=f"辞書：{self._short(self._entry_label(e), 40)}", state="disabled")
         m.add_separator()
+        if info:
+            for e in info.entries[:3]:
+                m.add_command(label=f"辞書タブでこの項目を開く（{self._short(e.src, 12)}）",
+                              command=lambda e=e: self.open_in_dict(e))
+            if info.status == "checked":
+                m.add_command(label="確認済みを外す", command=lambda: self.toggle_checked(ph, False))
+            elif info.status in ("unchecked", "risky", "dict"):
+                m.add_command(label="この文節を確認済みにする（耳で確かめた）", command=lambda: self.toggle_checked(ph, True))
+            m.add_separator()
 
         def add_restore(label, ref, done):
             r = core.phrase_region(cur, ref, ph.start, ph.end) if ref else None
@@ -1046,6 +1100,191 @@ class App:
         t.edit_separator()
         self._show_issues(core.validate(t.get("1.0", "end-1c")))
         self._refresh_status(f"「{self._short(old, 20)}」を{done}：{self._short(new, 30)}（Ctrl+Z で元に戻せます）")
+
+    # ── 変換結果の見える化 ────────────────────────
+    def _off(self, idx) -> int:
+        """Text の位置（"1.5" など）→ 先頭からの文字数"""
+        n = self.out_text.count("1.0", idx, "chars")
+        return n[0] if n else 0
+
+    def _tag_spans(self, tag) -> list[tuple[int, int]]:
+        r = self.out_text.tag_ranges(tag)
+        return [(self._off(r[i]), self._off(r[i + 1])) for i in range(0, len(r), 2)]
+
+    def _applied_now(self) -> list[tuple[int, int, core.Entry]]:
+        """辞書が当たった所を、いまの変換結果の上の位置で返す（手直しで位置がずれても、タグが付いて動く）"""
+        return [(a, b, e) for tag, e in self._ap_tags.items() for a, b in self._tag_spans(tag)]
+
+    def _schedule_insight(self):
+        """打つたびに数え直すと重いので、手が止まってから数え直す"""
+        if self._insight_job:
+            self.root.after_cancel(self._insight_job)
+        self._insight_job = self.root.after(200, self._update_insight)
+
+    def _update_insight(self):
+        """文節ごとの状態を決め直して、色と「今回の変換」の行を書き直す"""
+        self._insight_job = None
+        t = self.out_text
+        cur = t.get("1.0", "end-1c")
+        applied = self._applied_now()
+        self._infos = core.phrase_statuses(cur, self._out_converted, applied, self._tag_spans("checked"))
+        for tag in ("ph_unchecked", "ph_manual", "ph_risky"):
+            t.tag_remove(tag, "1.0", "end")
+        if self.phrase_colors.get():
+            for p in self._infos:
+                tag = {"unchecked": "ph_unchecked", "manual": "ph_manual", "risky": "ph_risky"}.get(p.status)
+                if tag:
+                    t.tag_add(tag, f"1.0+{p.start}c", f"1.0+{p.end}c")
+        if not self._out_converted:
+            return
+        sm = core.usage_summary(core.used_entries(applied))
+        n_un = sum(p.status == "unchecked" for p in self._infos)
+        n_risky = sum(p.status == "risky" for p in self._infos)
+        extra = [f"文脈付き{sm['context']}"] * bool(sm["context"]) + [f"誤爆注意{sm['risky']}"] * bool(sm["risky"])
+        line = f"辞書 {sm['places']}か所（{'・'.join([str(sm['entries']) + '項目'] + extra)}）"
+        line += f"　未確認 {n_un}文節" + (f"・誤爆注意 {n_risky}文節" if n_risky else "")
+        self.insight.set(line)
+
+    def goto_unchecked(self, backward=False):
+        """次（前）の未確認・誤爆注意の文節を選ぶ。選んだまま［試聴］すると、その文節だけを聞ける"""
+        if not self._out_converted:
+            self._refresh_status([("先に①に YMM4 の読みを貼って［変換］してください", "warn")])
+            return
+        self._update_insight()
+        t = self.out_text
+        p = core.next_phrase(self._infos, self._off("insert"), backward=backward)
+        if p is None:
+            self._refresh_status("未確認の文節はありません（どの文節も、辞書・手直し・確認済みのどれかです）")
+            return
+        t.tag_remove("sel", "1.0", "end")
+        t.tag_add("sel", f"1.0+{p.start}c", f"1.0+{p.end}c")
+        t.mark_set("insert", f"1.0+{p.end}c")
+        t.see(f"1.0+{p.start}c")
+        t.focus_set()
+        todo = [x for x in self._infos if x.status in ("unchecked", "risky")]
+        k = next(i for i, x in enumerate(todo) if x is p) + 1
+        what = core.PHRASE_STATUS[p.status]
+        parts = [(f"{k}／{len(todo)}：「{self._short(t.get('1.0', 'end-1c')[p.start:p.end], 20)}」は{what}文節です。", None)]
+        if p.status == "risky":
+            e = next(x for x in p.entries if core.entry_warnings(x))
+            parts.append((f"\n当たった項目：{self._entry_label(e)}（{'・'.join(core.entry_warnings(e))}）", "warn"))
+        parts.append((f"\n［試聴］（{self._key_label('preview')}）でこの文節だけ聞けます。"
+                      "良ければ右クリック →「確認済みにする」", None))
+        self._refresh_status(parts)
+
+    @staticmethod
+    def _entry_label(e: core.Entry) -> str:
+        ctx = core.ctx_label(e.before, e.after)
+        return f"{e.src} → {e.dst}" + (f"（{ctx}）" if ctx else "") + ("（句頭のみ）" if e.head_only else "")
+
+    def _entries_at(self, pos) -> list[core.Entry]:
+        idx = f"1.0+{pos}c"
+        return [self._ap_tags[g] for g in self.out_text.tag_names(idx) if g in self._ap_tags]
+
+    def _out_click(self, _e=None):
+        """黄色い所をクリックしたら、どの辞書の項目が当たったのかをメッセージ欄に出す"""
+        t = self.out_text
+        if t.tag_ranges("sel"):
+            return
+        found = self._entries_at(self._off("insert")) or self._entries_at(max(0, self._off("insert") - 1))
+        if found:
+            e = found[0]
+            parts = [("この所は辞書で置き換えました：", None), (self._entry_label(e), None)]
+            warns = core.entry_warnings(e)
+            if warns:
+                parts.append((f"\n誤爆しやすい項目です（{'・'.join(warns)}）", "warn"))
+            parts.append(("\n右クリック →「辞書タブでこの項目を開く」で、直したり消したりできます", None))
+            self._refresh_status(parts)
+
+    def open_in_dict(self, e: core.Entry):
+        """辞書タブで、その項目の行を選んで見せる（検索や絞り込みで隠れていたら、解いてから）"""
+        self.nb.select(2)
+        for attempt in range(2):
+            iid = next((k for k, v in self._row_keys.items() if v == e.key), None)
+            if iid:
+                self.dict_tv.selection_set(iid)
+                self.dict_tv.focus(iid)
+                self.dict_tv.see(iid)
+                self.dict_tv.focus_set()
+                return
+            self.q.set("")
+            self.risky_only.set(False)
+            self._fill_dict()
+        self._refresh_status([("この項目は、もう辞書にありません（消したか、書き換えたようです）", "warn")])
+
+    def toggle_checked(self, ph, on):
+        t = self.out_text
+        if on:
+            t.tag_add("checked", f"1.0+{ph.start}c", f"1.0+{ph.end}c")
+        else:
+            t.tag_remove("checked", f"1.0+{ph.start}c", f"1.0+{ph.end}c")
+        self._update_insight()
+        n_un = sum(p.status == "unchecked" for p in self._infos)
+        self._refresh_status(("確認済みにしました" if on else "確認済みを外しました") + f"（未確認の文節：残り {n_un}）"
+                             + (f"。次は［次の未確認へ］（{self._key_label('next_unchecked')}）" if on and n_un else ""))
+
+    def show_used_entries(self):
+        """今回の変換で当たった辞書の項目を一覧にする。行を選ぶと、変換結果の当たった所を順に選ぶ"""
+        used = core.used_entries(self._applied_now())
+        if not used:
+            self._refresh_status("今回の変換結果には、辞書で置き換えた所がありません" if self._out_converted
+                                 else "先に①に YMM4 の読みを貼って［変換］してください")
+            return
+        w = tk.Toplevel(self.root)
+        w.title("今回の変換で使われた辞書")
+        w.transient(self.root)
+        sm = core.usage_summary(used)
+        ttk.Label(w, text=f"適用 {sm['places']}か所（{sm['entries']}項目）　文脈付き {sm['context']}　"
+                          f"句頭のみ {sm['head']}　誤爆注意 {sm['risky']}", padding=(10, 8, 10, 0)).pack(anchor="w")
+        ttk.Label(w, text="行を選ぶと変換結果の当たった所を選びます（もう一度選ぶと次の所へ）。ダブルクリックで辞書タブを開きます",
+                  foreground="#666", padding=(10, 2)).pack(anchor="w")
+        cols = ("n", "src", "dst", "ctx", "warn")
+        tv = ttk.Treeview(w, columns=cols, show="headings", height=min(12, len(used)), selectmode="browse")
+        for c, wd, txt in (("n", 60, "回数"), ("src", 200, "YMM4側"), ("dst", 200, "置き換え後"),
+                           ("ctx", 170, "条件（前／後）"), ("warn", 220, "注意（誤爆しやすい）")):
+            tv.heading(c, text=txt)
+            tv.column(c, width=self._sc(wd), anchor="center" if c == "n" else "w", stretch=c != "n")
+        tv.tag_configure("risky", foreground=MSG_STYLE["warn"]["fg"])
+        rows = {}
+        for i, u in enumerate(used):
+            e = u.entry
+            tv.insert("", "end", iid=f"u{i}", values=(u.count, e.src, e.dst, core.ctx_label(e.before, e.after),
+                                                      "・".join(u.risky)), tags=("risky",) if u.risky else ())
+            rows[f"u{i}"] = e
+        tv.pack(fill="both", expand=True, padx=10, pady=6)
+        turn = {"iid": None, "k": -1}
+
+        def show_next(_ev=None):
+            sel = tv.selection()
+            if not sel:
+                return
+            e = rows[sel[0]]
+            spans = sorted((a, b) for a, b, x in self._applied_now() if x is e)
+            if not spans:
+                return
+            turn["k"] = (turn["k"] + 1) % len(spans) if turn["iid"] == sel[0] else 0
+            turn["iid"] = sel[0]
+            a, b = spans[turn["k"]]
+            t = self.out_text
+            t.tag_remove("sel", "1.0", "end")
+            t.tag_add("sel", f"1.0+{a}c", f"1.0+{b}c")
+            t.mark_set("insert", f"1.0+{b}c")
+            t.see(f"1.0+{a}c")
+            self._refresh_status(f"{self._entry_label(e)}：{turn['k'] + 1}／{len(spans)}か所目を選びました")
+
+        tv.bind("<<TreeviewSelect>>", show_next)
+        tv.bind("<ButtonRelease-1>", lambda ev: show_next() if tv.identify_row(ev.y) == turn["iid"] else None)
+        tv.bind("<Double-1>", lambda ev: tv.selection() and open_and_close())
+
+        def open_and_close():
+            e = rows[tv.selection()[0]]
+            w.destroy()
+            self.open_in_dict(e)
+
+        bf = ttk.Frame(w, padding=(10, 0, 10, 10))
+        bf.pack(fill="x")
+        ttk.Button(bf, text="辞書タブでこの項目を開く", command=lambda: tv.selection() and open_and_close()).pack(side="left")
+        ttk.Button(bf, text="閉じる", command=w.destroy).pack(side="right")
 
     def _register_phrase(self, ph):
         """この文節の手直しを、辞書の追加画面に入れて開く（YMM4側＝辞書を当てる前の形、置き換え後＝今の文節）"""
@@ -1963,6 +2202,9 @@ class App:
         ttk.Checkbutton(tab, text="起動時に、置き場所（OneDrive などの同期フォルダ・Program Files）を確かめて知らせる"
                                   "（ZIP の中から開いたときと、書き込めないときは、常に知らせます）",
                         variable=self.check_place, command=self._save_conf).pack(anchor="w", pady=(8, 0))
+        ttk.Checkbutton(tab, text="変換結果で、未確認の文節と、手で直した文節に色を付ける",
+                        variable=self.phrase_colors,
+                        command=lambda: (self._save_conf(), self._update_insight())).pack(anchor="w", pady=(4, 0))
 
         # ショートカット
         ttk.Separator(tab).pack(fill="x", pady=10)
