@@ -15,6 +15,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import tkinter as tk
 import tkinter.font as tkfont
 from tkinter import ttk, messagebox, filedialog
@@ -22,7 +23,7 @@ from tkinter import ttk, messagebox, filedialog
 import accent_core as core
 
 APP_NAME = "ゆっくりアクセント辞書"
-VERSION = "0.7.2"
+VERSION = "0.7.3"
 
 if getattr(sys, "frozen", False):
     BASE_DIR = os.path.dirname(sys.executable)
@@ -79,6 +80,9 @@ SHORTCUTS = [
     ("recheck", "再チェック", "<Key-F7>"),
     ("preview", "試聴", "<Key-F5>"),
     ("stop", "試聴を止める", "<Key-F6>"),
+    ("mute", "消音（もう一度で元に戻す）", "<Key-F9>"),
+    ("vol_down", "試聴の音量を下げる", ""),
+    ("vol_up", "試聴の音量を上げる", ""),
     ("accent_panel", "アクセント編集を開く／閉じる", "<Key-F8>"),
     ("acc_left", "アクセントを前の文字へ（カーソルのある文節）", "<Alt-Key-Left>"),
     ("acc_right", "アクセントを後ろの文字へ（カーソルのある文節）", "<Alt-Key-Right>"),
@@ -148,7 +152,14 @@ class App:
         self.preset_info = tk.StringVar()   # 設定タブ: プリセットを読めたかどうか
         self._preview_gen = 0      # 試聴の世代。停止や新しい試聴で古い結果を捨てる
         self._proc = None          # 書き出し中の AquesTalkPlayer
-        self._wav = None           # いま再生している一時WAV
+        self._wav = None           # いま再生している一時WAV（音量を変えた物）
+        self._wav_raw = None       # AquesTalkPlayer が書き出したままの一時WAV（音量を変え直す元）
+        self._play_until = 0.0     # 再生が終わるおよその時刻（time.monotonic）
+        self.volume = core.step_volume(int(self.conf.get("volume", 100) or 0), 0)
+        self.muted = bool(self.conf.get("muted", False))
+        self.auto_watch = tk.BooleanVar(value=self.conf.get("auto_watch", True))
+        self._away = False         # ほかのアプリに切り替えている間 True
+        self._last_copied = None   # このツールが最後にクリップボードへ入れた物
         self._texts = []
         self._out_converted = ""   # 最後に［変換］した結果（手直しの有無を見るため）
         self._out_prepared = ""    # 同じく、辞書を当てる前の形（「辞書適用前に戻す」用）
@@ -173,14 +184,23 @@ class App:
         elif place:
             self._refresh_status(place)
         else:
-            self._refresh_status(f"YMM4 でセリフの読みをコピーして［貼り付けて変換］（{self._key_label('paste_convert')}）を押すと、"
-                                 "変換した結果がクリップボードに入ります。そのまま YMM4 に貼り付けてください。")
+            if self.auto_watch.get():
+                self._refresh_status("YMM4 でセリフの読みをコピーして、この画面に戻ってくると、自動で貼り付けて変換し、"
+                                     "結果をクリップボードに入れます。そのまま YMM4 に貼り付けてください。"
+                                     f"\n（［貼り付けて変換］（{self._key_label('paste_convert')}）を押しても同じです）")
+            else:
+                self._refresh_status(f"YMM4 でセリフの読みをコピーして［貼り付けて変換］（{self._key_label('paste_convert')}）を押すと、"
+                                     "変換した結果がクリップボードに入ります。そのまま YMM4 に貼り付けてください。")
 
         # Ctrl＋マウスホイールで文字の大きさを変える
         root.bind_all("<Control-MouseWheel>", lambda e: (self.set_scale(self.scale + (0.1 if e.delta > 0 else -0.1)), "break")[1])
         root.bind_all("<Control-Button-4>", lambda e: (self.set_scale(self.scale + 0.1), "break")[1])
         root.bind_all("<Control-Button-5>", lambda e: (self.set_scale(self.scale - 0.1), "break")[1])
         root.protocol("WM_DELETE_WINDOW", self.on_close)
+        # ほかのアプリ（YMM4）から戻ってきたら、新しくコピーされた読みを自動で変換する
+        self._clip_seen = self._clipboard()
+        root.bind_all("<FocusOut>", lambda e: root.after(80, self._check_away), add="+")
+        root.bind_all("<FocusIn>", self._on_focus_in, add="+")
         if self.conf.get("accent_panel"):
             self._open_panel_at_start()
 
@@ -223,6 +243,9 @@ class App:
         self.conf["pitch_line"] = bool(self.pitch_line.get())
         self.conf["check_location"] = bool(self.check_place.get())
         self.conf["shortcuts"] = self.shortcuts
+        self.conf["volume"] = self.volume
+        self.conf["muted"] = self.muted
+        self.conf["auto_watch"] = bool(self.auto_watch.get())
         try:
             with open(CONF_PATH, "w", encoding="utf-8") as f:
                 json.dump(self.conf, f, ensure_ascii=False, indent=1)
@@ -383,6 +406,8 @@ class App:
         acts = {
             "paste_convert": self.paste_and_convert, "convert": self.do_convert, "copy": self.copy_output,
             "recheck": self.recheck, "preview": self.preview, "stop": self.stop_preview,
+            "mute": self.toggle_mute,
+            "vol_down": lambda: self.change_volume(-1), "vol_up": lambda: self.change_volume(1),
             "accent_panel": self.toggle_accent_panel,
             "acc_left": lambda: self.move_accent(-1), "acc_right": lambda: self.move_accent(1),
             "acc_here": self.accent_at_cursor, "acc_clear": self.clear_accent,
@@ -563,6 +588,8 @@ class App:
         ttk.Checkbutton(mid, text="変換したら自動でコピー", variable=self.auto_copy).pack(side="left", padx=12)
         ttk.Checkbutton(mid, text="記号を色分け", variable=self.color_marks,
                         command=self._repaint_all).pack(side="left")
+        ttk.Checkbutton(mid, text="戻ってきたら自動で貼り付けて変換", variable=self.auto_watch,
+                        command=self._save_conf).pack(side="left", padx=12)
         self.btn_acc = ttk.Button(mid, command=self.toggle_accent_panel)
         self.btn_acc.pack(side="right")
         self._build_accent_panel(tab, mid)
@@ -594,26 +621,35 @@ class App:
         self.btn_play.pack(side="left")
         self.btn_stop = self._hint("stop", ttk.Button(pv, style="Big.TButton", command=self.stop_preview), "■ 停止")
         self.btn_stop.pack(side="left", padx=(4, 12))
+        ttk.Label(pv, text="音量").pack(side="left")
+        self.btn_vol_down = self._hint("vol_down", ttk.Button(pv, width=3, command=lambda: self.change_volume(-1)), "▼")
+        self.btn_vol_down.pack(side="left", padx=(4, 0))
+        self.vol_label = tk.Label(pv, width=5, font=self.fonts["big"], fg="black")
+        self.vol_label.pack(side="left")
+        self.btn_vol_up = self._hint("vol_up", ttk.Button(pv, width=3, command=lambda: self.change_volume(1)), "▲")
+        self.btn_vol_up.pack(side="left")
+        self.btn_mute = self._hint("mute", ttk.Button(pv, command=self.toggle_mute), "消音")
+        self.btn_mute.pack(side="left", padx=(4, 12))
+        self._show_volume()
         ttk.Label(pv, text="声（プリセット）:").pack(side="left")
         # 候補 = このツールで再生できた名前（新しい順）＋ AquesTalkPlayer.preset にあるプリセット
         self._used_voices = list(self.conf.get("voice_presets") or DEFAULT_PRESETS)
         self._player_presets: dict[str, bool] = {}   # プリセット名 → 棒読みか
         last = self.conf.get("voice_preset", self._used_voices[0] if self._used_voices else "")
         self.voice = tk.StringVar(value=last)
-        self.voice_box = ttk.Combobox(pv, textvariable=self.voice, width=16, font=self.f_ui,
+        self.voice_box = ttk.Combobox(pv, textvariable=self.voice, width=12, font=self.f_ui,
                                       postcommand=self._refresh_voice_list)
         self.voice_box.pack(side="left", padx=4)
         self.voice_box.bind("<<ComboboxSelected>>", lambda e: self._warn_bouyomi())
         self._refresh_voice_list()
         self.btn_open_player = ttk.Button(pv, text="AquesTalkPlayer を開く", command=self.open_player)
-        self.btn_open_player.pack(side="left", padx=(8, 0))
-        if IS_WINDOWS:
-            hint = "選択した所だけ読むこともできます"
-        else:
-            hint = "試聴は Windows 専用です（AquesTalkPlayer が Windows 用のため）"
-            for w in (self.btn_play, self.btn_stop, self.voice_box, self.btn_open_player):
+        self.btn_open_player.pack(side="right")
+        if not IS_WINDOWS:
+            ttk.Label(tab, text="試聴は Windows 専用です（AquesTalkPlayer が Windows 用のため）",
+                      foreground="#666").pack(anchor="w")
+            for w in (self.btn_play, self.btn_stop, self.voice_box, self.btn_open_player,
+                      self.btn_vol_down, self.btn_vol_up, self.btn_mute):
                 w.state(["disabled"])
-        ttk.Label(pv, text=hint, foreground="#666").pack(side="left", padx=8)
 
         ttk.Label(tab, text="チェック結果（クリックすると該当箇所を選択）").pack(anchor="w", pady=(10, 2))
         self.issue_list = tk.Listbox(tab, height=4, font=self.f_ui, activestyle="none")
@@ -630,7 +666,7 @@ class App:
         self.in_text.insert("1.0", s)
         self.do_convert()
 
-    def do_convert(self):
+    def do_convert(self, auto=False):
         raw = self.in_text.get("1.0", "end-1c")
         res = core.convert(raw, self.dic, self.numbers)
         self.out_text.delete("1.0", "end")
@@ -647,7 +683,8 @@ class App:
             self._fill_dict()   # 使用回数の表示を更新
         n_err = sum(i.level == "error" for i in res.issues)
         n_warn = len(res.issues) - n_err
-        parts = [(f"変換しました：辞書で置き換え {len(res.applied)} か所 ／ ", None)] + self._count_parts(n_err, n_warn)
+        head = "コピーされていた読みを自動で貼り付けて変換しました" if auto else "変換しました"
+        parts = [(f"{head}：辞書で置き換え {len(res.applied)} か所 ／ ", None)] + self._count_parts(n_err, n_warn)
         if self.auto_copy.get() and res.text:
             parts.append(("　— コピーしました", None))
         if n_err:
@@ -694,6 +731,49 @@ class App:
     def _copy(self, s):
         self.root.clipboard_clear()
         self.root.clipboard_append(s)
+        self._last_copied = s
+        self._clip_seen = s
+
+    def _clipboard(self):
+        try:
+            return self.root.clipboard_get()
+        except tk.TclError:
+            return ""
+
+    def _check_away(self):
+        """フォーカスがこのツールのどの画面にも無ければ、ほかのアプリに切り替えたとみなす"""
+        try:
+            self._away = self.root.focus_get() is None
+        except (KeyError, tk.TclError):
+            pass
+
+    def _on_focus_in(self, _e=None):
+        if not self._away:
+            return
+        self._away = False
+        self.root.after(120, self._auto_paste)
+
+    def _auto_paste(self):
+        """YMM4 などから戻ってきたとき、新しくコピーされた読みがあれば貼り付けて変換する"""
+        if not self.auto_watch.get():
+            return
+        try:
+            if self.nb.index(self.nb.select()) != 0:   # 変換タブを開いているときだけ
+                return
+        except tk.TclError:
+            return
+        clip = self._clipboard()
+        act = core.auto_convert_action(clip, self._clip_seen, self.in_text.get("1.0", "end-1c"),
+                                       self._last_copied, self.out_text.get("1.0", "end-1c"),
+                                       self._out_converted)
+        self._clip_seen = clip
+        if act == "edited":
+            self._refresh_status([("新しい読みがコピーされていますが、変換結果を手直し中なので自動では変換しませんでした。", "warn"),
+                                  (f"\n変換するときは［貼り付けて変換］（{self._key_label('paste_convert')}）を押してください", None)])
+        elif act == "convert":
+            self.in_text.delete("1.0", "end")
+            self.in_text.insert("1.0", clip)
+            self.do_convert(auto=True)
 
     def copy_output(self):
         s = self.out_text.get("1.0", "end-1c")
@@ -1183,7 +1263,12 @@ class App:
         sel = t.get("sel.first", "sel.last") if t.tag_ranges("sel") else None
         text, partial = core.preview_text(sel, t.get("1.0", "end-1c"))
         # 改行や記号だけをうっかり選んでいたときは、全体を読んだことを知らせる
-        self._preview_note = "（選択した所に読める文字がなかったので、全体を読み上げています）" if sel and not partial else ""
+        if sel and not partial:
+            self._preview_note = "（選択した所に読める文字がなかったので、全体を読み上げています）"
+        elif not sel:
+            self._preview_note = "　※②で選択した所だけ読むこともできます"
+        else:
+            self._preview_note = ""
         return text
 
     def _remember_voice(self, name):
@@ -1317,14 +1402,114 @@ class App:
             return
         self._remember_voice(voice)   # 使えたプリセットだけ候補に残す
         self._save_conf()
+        self._wav_raw = wav
+        if not self._play_raw():
+            return
+        if self.muted:
+            self._refresh_status([("消音中なので、音は出ていません。", "warn"),
+                                  ("［消音中］" + (f"（{self._key_label('mute')}）" if self._key('mute') else "") + "を押すと、音を戻して最初から鳴らします", None)])
+        elif not self._warn_bouyomi(voice):
+            self._refresh_status(f"試聴：再生中（{voice or '前回のプリセット'}・音量 {self.volume}%）{self._preview_note}\n{self._preview_said}")
+
+    def _silence(self):
+        """鳴っている音だけを止める（直前の試聴の音声は、鳴らし直せるように残す）"""
         import winsound
-        self._wav = wav
         try:
-            winsound.PlaySound(wav, winsound.SND_FILENAME | winsound.SND_ASYNC)
-            if not self._warn_bouyomi(voice):
-                self._refresh_status(f"試聴：再生中（{voice or '前回のプリセット'}）{self._preview_note}\n{self._preview_said}")
-        except RuntimeError as ex:
+            winsound.PlaySound(None, 0)
+        except RuntimeError:
+            pass
+        if self._wav:
+            self._remove_file(self._wav)
+            self._wav = None
+
+    def _play_raw(self) -> bool:
+        """書き出したWAVを、いまの音量に直して最初から再生する。
+        消音中は鳴らさないが、鳴っていたはずの時間は覚えておく（その間に消音を解くと、最初から鳴らす）"""
+        import winsound
+        self._silence()
+        self._play_until = 0.0
+        if not self._wav_raw:
+            return True
+        try:
+            if self.muted:
+                play, secs = None, self._wav_secs(self._wav_raw)
+            elif self.volume == 100:
+                play, secs = self._wav_raw, self._wav_secs(self._wav_raw)
+            else:
+                fd, play = tempfile.mkstemp(prefix="yukkuri-accent-vol-", suffix=".wav")
+                os.close(fd)
+                self._wav = play
+                secs = core.scale_wav(self._wav_raw, play, self.volume)
+            if play:
+                winsound.PlaySound(play, winsound.SND_FILENAME | winsound.SND_ASYNC)
+            self._play_until = time.monotonic() + secs
+            return True
+        except (RuntimeError, OSError, EOFError, ValueError) as ex:
             messagebox.showerror(APP_NAME, f"音声を再生できませんでした。\n{ex}")
+            return False
+
+    @staticmethod
+    def _wav_secs(path) -> float:
+        import wave
+        try:
+            with wave.open(path, "rb") as r:
+                return r.getnframes() / (r.getframerate() or 1)
+        except (OSError, EOFError, wave.Error):
+            return 0.0
+
+    def _playing(self) -> bool:
+        return bool(self._wav_raw) and time.monotonic() < self._play_until
+
+    # ── 試聴の音量 ──────────────────────────────────
+    def _show_volume(self):
+        if self.muted:
+            self.vol_label.configure(text="消音", fg="#b00000")
+        else:
+            self.vol_label.configure(text=f"{self.volume}%", fg="black")
+        key = self._key("mute")
+        text = "消音中" if self.muted else "消音"
+        for i, (aid, btn, _) in enumerate(self._hint_buttons):
+            if aid == "mute":
+                self._hint_buttons[i] = (aid, btn, text)
+        self.btn_mute.configure(text=f"{text}（{core.shortcut_label(key)}）" if key else text)
+        self.btn_vol_down.state(["disabled" if self.volume <= core.VOLUME_MIN or not IS_WINDOWS else "!disabled"])
+        self.btn_vol_up.state(["disabled" if self.volume >= core.VOLUME_MAX or not IS_WINDOWS else "!disabled"])
+
+    def change_volume(self, d):
+        """試聴の音量を1段上げ下げする。消音中なら消音を解く。鳴っている途中なら、新しい音量で最初から鳴らし直す"""
+        new = core.step_volume(self.volume, d)
+        if new == self.volume and not self.muted:
+            edge = "最大" if d > 0 else "最小"
+            self._refresh_status(f"音量はこれ以上{'上げ' if d > 0 else '下げ'}られません（{edge} {self.volume}%）")
+            return
+        replay = IS_WINDOWS and self._playing()
+        unmuted = self.muted
+        self.volume, self.muted = new, False
+        self._show_volume()
+        self._save_conf()
+        msg = f"試聴の音量：{self.volume}%" + ("（消音を解きました）" if unmuted else "")
+        if replay:
+            self._play_raw()
+            self._refresh_status(msg + "　新しい音量で最初から鳴らし直しています")
+        else:
+            self._refresh_status(msg + "　次の試聴から、この音量で鳴ります")
+
+    def toggle_mute(self):
+        """消音を切り替える。消音にするとすぐ止まり、鳴っている途中で戻すと最初から鳴らし直す"""
+        self.muted = not self.muted
+        self._show_volume()
+        self._save_conf()
+        if not IS_WINDOWS:
+            return
+        if self.muted:
+            self._silence()
+            self._refresh_status([("消音にしました。", "warn"),
+                                  (f"もう一度押すと、元の音量（{self.volume}%）に戻ります", None)])
+        elif self._playing():
+            self._play_raw()
+            self._refresh_status(f"消音を解きました（音量 {self.volume}%）。鳴っている途中だった試聴を、最初から鳴らし直しています")
+        else:
+            self._refresh_status(f"消音を解きました（音量 {self.volume}%）")
 
     def stop_preview(self):
         self._preview_gen += 1
@@ -1343,9 +1528,12 @@ class App:
         self._remove_wav()
 
     def _remove_wav(self):
-        if self._wav:
-            self._remove_file(self._wav)
-            self._wav = None
+        for name in ("_wav", "_wav_raw"):
+            p = getattr(self, name)
+            if p:
+                self._remove_file(p)
+                setattr(self, name, None)
+        self._play_until = 0.0
 
     @staticmethod
     def _remove_file(p):

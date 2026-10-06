@@ -56,6 +56,7 @@ jobs:
           python tests/test_phrase_ops.py
           python tests/test_context_dict.py
           python tests/test_context_spec.py
+          python tests/test_volume_autopaste.py
           python tests/check_numbers.py > /dev/null
 
       - name: アイコンを用意する

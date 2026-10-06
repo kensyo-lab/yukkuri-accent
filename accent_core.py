@@ -902,6 +902,78 @@ def preview_text(selected: str | None, whole: str) -> tuple[str, bool]:
     return (t if has_kana(t) else ""), False
 
 
+# ── 試聴の音量 ──────────────────────────────────
+VOLUME_MIN, VOLUME_MAX, VOLUME_STEP = 0, 150, 10   # ％。100 が AquesTalkPlayer の書き出したままの大きさ
+
+
+def step_volume(v: int, d: int) -> int:
+    """音量を d 段（1段 = VOLUME_STEP ％）上げ下げする。端で止まり、刻みにそろえる。"""
+    v = round(v / VOLUME_STEP) * VOLUME_STEP + d * VOLUME_STEP
+    return max(VOLUME_MIN, min(VOLUME_MAX, v))
+
+
+def scale_wav(src: str, dst: str, percent: int) -> float:
+    """WAV の音量を percent ％にして dst に書く（はみ出す所は最大値で止める）。
+    16ビット・8ビットの PCM に対応。それ以外の形式はそのまま写す。戻り値: 再生時間（秒）"""
+    import array
+    import shutil
+    import sys
+    import wave
+    with wave.open(src, "rb") as r:
+        params = r.getparams()
+        frames = r.readframes(params.nframes)
+    secs = params.nframes / params.framerate if params.framerate else 0.0
+    g = max(0, percent) / 100
+    if params.sampwidth == 2:
+        a = array.array("h")
+        a.frombytes(frames)
+        if sys.byteorder == "big":
+            a.byteswap()
+        a = array.array("h", (max(-32768, min(32767, int(x * g))) for x in a))
+        if sys.byteorder == "big":
+            a.byteswap()
+        frames = a.tobytes()
+    elif params.sampwidth == 1:   # 8ビットは 128 が無音
+        frames = bytes(max(0, min(255, 128 + int((x - 128) * g))) for x in frames)
+    else:
+        if src != dst:
+            shutil.copyfile(src, dst)
+        return secs
+    with wave.open(dst, "wb") as w:
+        w.setparams(params)
+        w.writeframes(frames)
+    return secs
+
+
+# ── 画面に戻ったときの自動変換 ──────────────────────
+_KANJI_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff々〆]")
+
+
+def looks_like_reading(s: str) -> bool:
+    """クリップボードの中身が YMM4 の「読み」らしいか。仮名を含み、漢字を含まないもの。
+    （ふつうの文章や、ほかのアプリでコピーした物を勝手に変換しないため）"""
+    t = (s or "").strip()
+    if not t or len(t) > 20000 or _KANJI_RE.search(t):
+        return False
+    return any(is_hira(c) or is_kata(c) for c in t)
+
+
+def auto_convert_action(clip: str, seen: str | None, last_in: str, last_copied: str | None,
+                        out_now: str, out_converted: str) -> str | None:
+    """画面に戻ったとき、クリップボードの中身をどうするか。
+    None: 何もしない（前に見た物・このツールがコピーした物・読みではない物）
+    "edited": 新しい読みだが、変換結果を手直し中なので変換しない（手直しを消さないため）
+    "convert": 貼り付けて変換する"""
+    if clip == seen or not looks_like_reading(clip):
+        return None
+    c = clip.strip()
+    if c in (last_in.strip(), (last_copied or "").strip(), out_now.strip()):
+        return None
+    if out_now.strip() and out_now != out_converted:
+        return "edited"
+    return "convert"
+
+
 def split_phrases(s: str) -> list[Phrase | Sep]:
     """記号列を、文節（Phrase）と区切り（Sep）の並びに分ける。<タグ> は1つの拍（アクセント不可）として扱う。"""
     tags = {m.start(): m.end() for m in TAG_RE.finditer(s)}
