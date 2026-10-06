@@ -1577,3 +1577,114 @@ def dict_diff(now: "Dictionary", other: "Dictionary") -> tuple[list[Entry], list
     removed = [a[k] for k in sorted(a) if k not in b]
     changed = [(a[k], b[k]) for k in sorted(a) if k in b and (a[k].dst, a[k].head_only) != (b[k].dst, b[k].head_only)]
     return added, removed, changed
+
+
+# ─────────────────────────────────────────────
+# 変換結果の見える化（どの辞書が当たったか・どの文節がまだ誰にも見られていないか）
+# ─────────────────────────────────────────────
+# 文節の状態。「正しいかどうか」ではなく「何が起きたか」を表す（辞書が当たっても誤爆はありうる）
+PHRASE_STATUS = {
+    "manual": "手で直した",
+    "checked": "確認済みにした",
+    "risky": "誤爆しやすい辞書で直した",
+    "dict": "辞書で直した",
+    "unchecked": "まだ誰も触っていない",
+}
+_STATUS_ORDER = ("manual", "checked", "risky", "dict")   # 1つの文節に複数当てはまるときは、前の方を採る
+
+
+@dataclass
+class PhraseInfo:
+    start: int
+    end: int
+    status: str                                      # PHRASE_STATUS のどれか
+    entries: list = field(default_factory=list)      # この文節に当たった辞書の項目
+
+
+def edited_marks(cur: str, ref: str) -> tuple[list[bool], set[int]]:
+    """cur のうち、ref（変換した直後の形）から書き換わった所を調べる。
+    戻り値: (cur の各文字が書き換わった・足された文字か, 文字が消された位置の集合)"""
+    changed = [False] * len(cur)
+    deleted: set[int] = set()
+    sm = difflib.SequenceMatcher(None, cur, ref, autojunk=False)
+    # a=cur, b=ref で比べる。"delete" は cur にだけある文字（足された）、"insert" は ref にだけある文字（消された）
+    for tag, i1, i2, j1, j2 in sm.get_opcodes():
+        if tag in ("replace", "delete"):
+            for i in range(i1, i2):
+                changed[i] = True
+        elif tag == "insert":
+            deleted.add(i1)                       # ref にあった文字が、cur の i1 の所で消えた
+    return changed, deleted
+
+
+def phrase_statuses(cur: str, converted: str, applied: list[tuple[int, int, "Entry"]],
+                    checked: list[tuple[int, int]] = ()) -> list[PhraseInfo]:
+    """変換結果 cur の文節ごとに、何が起きたかを決める。
+    converted: ［変換］した直後の形（手直しを見分けるため）。空なら、まだ変換していないので空を返す
+    applied:   辞書が当たった所 (始め, 終わり, 項目)。位置は cur の上で数える
+    checked:   人が「確認済み」にした所 (始め, 終わり)"""
+    if not converted:
+        return []
+    changed, deleted = edited_marks(cur, converted)
+    out = []
+    for p in split_phrases(cur):
+        if not isinstance(p, Phrase) or p.end <= p.start:
+            continue
+        s, e = p.start, p.end
+        found = set()
+        if any(changed[s:e]) or any(s < i <= e for i in deleted):
+            found.add("manual")
+        if any(a < e and b > s for a, b in checked):
+            found.add("checked")
+        entries = []
+        for a, b, en in applied:
+            if a < e and b > s and all(en is not x for x in entries):   # 同じ項目は1回だけ
+                entries.append(en)
+        if entries:
+            found.add("risky" if any(entry_warnings(en) for en in entries) else "dict")
+        status = next((x for x in _STATUS_ORDER if x in found), "unchecked")
+        out.append(PhraseInfo(s, e, status, entries))
+    return out
+
+
+def next_phrase(infos: list[PhraseInfo], pos: int, want=("unchecked", "risky"),
+                backward: bool = False) -> PhraseInfo | None:
+    """pos より後ろ（backward なら前）で、状態が want の文節を探す。端まで行ったら反対の端から続ける"""
+    hits = [p for p in infos if p.status in want]
+    if not hits:
+        return None
+    if backward:
+        before = [p for p in hits if p.end < pos]
+        return before[-1] if before else hits[-1]
+    after = [p for p in hits if p.start > pos]
+    return after[0] if after else hits[0]
+
+
+@dataclass
+class UsedEntry:
+    entry: "Entry"
+    count: int                 # 今回の変換で当たった回数
+    risky: list[str]           # 誤爆しやすい理由（entry_warnings）。無ければ空
+
+
+def used_entries(applied: list[tuple[int, int, "Entry"]]) -> list[UsedEntry]:
+    """今回の変換で当たった辞書の項目を、最初に当たった順に、回数つきで並べる"""
+    counts: dict[int, UsedEntry] = {}
+    for _, _, e in sorted(applied, key=lambda x: x[0]):
+        u = counts.get(id(e))
+        if u:
+            u.count += 1
+        else:
+            counts[id(e)] = UsedEntry(e, 1, entry_warnings(e))
+    return list(counts.values())
+
+
+def usage_summary(used: list[UsedEntry]) -> dict:
+    """「適用 7か所（5項目）／文脈付き 2／誤爆注意 1」の数"""
+    return {
+        "places": sum(u.count for u in used),
+        "entries": len(used),
+        "context": sum(1 for u in used if u.entry.before or u.entry.after),
+        "head": sum(1 for u in used if u.entry.head_only),
+        "risky": sum(1 for u in used if u.risky),
+    }
