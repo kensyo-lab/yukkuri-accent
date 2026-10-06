@@ -2202,7 +2202,7 @@ class App:
         ttk.Checkbutton(tab, text="起動時に、置き場所（OneDrive などの同期フォルダ・Program Files）を確かめて知らせる"
                                   "（ZIP の中から開いたときと、書き込めないときは、常に知らせます）",
                         variable=self.check_place, command=self._save_conf).pack(anchor="w", pady=(8, 0))
-        ttk.Checkbutton(tab, text="変換結果で、まだ誰も触っていない文節（未確認）と、手で直した文節に色を付ける",
+        ttk.Checkbutton(tab, text="変換結果で、未確認の文節と、手で直した文節に色を付ける",
                         variable=self.phrase_colors,
                         command=lambda: (self._save_conf(), self._update_insight())).pack(anchor="w", pady=(4, 0))
 
