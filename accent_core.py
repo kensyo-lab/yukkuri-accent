@@ -560,6 +560,8 @@ class Entry:
     hits: int = 0
     before: str = ""         # 文脈の条件: 直前がこれで終わるときだけ当てる（空なら条件なし）
     after: str = ""          # 文脈の条件: 直後がこれで始まるときだけ当てる（空なら条件なし）
+    # この版が知らない項目（新しい版で増えた情報など）。読み込んだまま保存し直して、消さないようにする
+    extra: dict = field(default_factory=dict, compare=False, repr=False)
 
     @property
     def key(self) -> tuple[str, str, str]:
@@ -580,13 +582,18 @@ class Entry:
             d["added"] = self.added
         if self.hits:
             d["hits"] = self.hits
+        for k, v in self.extra.items():
+            d.setdefault(k, v)
         return d
+
+    KNOWN = {"from", "to", "before", "after", "head_only", "note", "added", "hits"}
 
     @staticmethod
     def from_json(d):
         return Entry(normalize(d["from"]), normalize(d["to"]), bool(d.get("head_only")),
                      d.get("note", ""), d.get("added", ""), int(d.get("hits", 0)),
-                     normalize(d.get("before", "")), normalize(d.get("after", "")))
+                     normalize(d.get("before", "")), normalize(d.get("after", "")),
+                     {k: v for k, v in d.items() if k not in Entry.KNOWN})
 
 
 @dataclass
@@ -636,11 +643,19 @@ def entry_priority(e: "Entry"):
 
 class Dictionary:
     FORMAT = "yukkuri-accent-dict"
+    VERSION = 2          # この版が分かる辞書の形式の版（1: 条件なし 2: 前後の条件つき）
 
     def __init__(self, name: str = "マイ辞書"):
         self.name = name
         self.entries: list[Entry] = []
         self._index: dict[str, list[Entry]] | None = None
+        self.file_version = 0        # 読み込んだファイルの形式の版
+        self.extra: dict = {}        # この版が知らない、ファイル全体の情報（そのまま保存し直す）
+
+    @property
+    def newer_format(self) -> bool:
+        """この版より新しい版で作られた辞書か（知らない情報は消さずに残すが、念のため知らせる）"""
+        return self.file_version > self.VERSION
 
     # 入出力 ---------------------------------------------------------
     @classmethod
@@ -651,11 +666,16 @@ class Dictionary:
                 data = json.load(f)
             d.name = data.get("name", d.name)
             d.entries = [Entry.from_json(e) for e in data.get("entries", [])]
+            d.file_version = int(data.get("version", 1) or 1)
+            d.extra = {k: v for k, v in data.items() if k not in ("format", "version", "name", "entries")}
         return d
 
     def save(self, path: str):
-        data = {"format": self.FORMAT, "version": 2 if any(e.before or e.after for e in self.entries) else 1,
+        ver = 2 if any(e.before or e.after for e in self.entries) else 1
+        data = {"format": self.FORMAT, "version": max(ver, self.file_version),   # 新しい形式の版は下げない
                 "name": self.name, "entries": [e.to_json() for e in sorted(self.entries, key=lambda e: e.key)]}
+        for k, v in self.extra.items():
+            data.setdefault(k, v)
         tmp = path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=1)
@@ -715,7 +735,9 @@ class Dictionary:
             v.sort(key=entry_priority)
         self._index = idx
 
-    def apply(self, s: str) -> tuple[str, list[Applied]]:
+    def apply(self, s: str, skip: "Entry | None" = None) -> tuple[str, list[Applied]]:
+        """辞書を当てる。skip の項目は無いものとして扱う（競合チェックで「これが無かったら」を試すため）。
+        使用回数はここでは数えない（count_usage で、同じ台詞を何度変換しても1回と数える）"""
         if self._index is None:
             self._build_index()
         out, applied = [], []
@@ -724,7 +746,7 @@ class Dictionary:
         while i < len(s):
             hit = None
             for e in self._index.get(s[i], ()):
-                if s.startswith(e.src, i):
+                if e is not skip and s.startswith(e.src, i):
                     if e.head_only and i > 0 and s[i - 1] not in BOUNDARY:
                         continue
                     if (e.before or e.after) and not ctx_match(e, s, i, i + len(e.src)):
@@ -735,7 +757,6 @@ class Dictionary:
                 out.append(hit.dst)
                 applied.append(Applied(olen, olen + len(hit.dst), hit))
                 olen += len(hit.dst)
-                hit.hits += 1
                 i += len(hit.src)
             else:
                 out.append(s[i])
@@ -1339,6 +1360,48 @@ def backup_file(path: str, folder: str, keep: int = 20, now: _dt.datetime | None
     return dst
 
 
+KEEP_DIR = "keep"      # バックアップのうち、古い順に消さずに残し続けるもの（版を上げる前・月の最初）
+
+
+def keep_backup(path: str, folder: str, label: str) -> str | None:
+    """path を folder/keep/ に「label」の名前で写す。すでにあれば写さない（最初の1回だけを残す）。
+    ふつうのバックアップ（新しい20個）は古い順に消えるので、節目の状態はこちらに残す。"""
+    dst = os.path.join(folder, KEEP_DIR, f"{BACKUP_PREFIX}keep_{label}.json")
+    if os.path.exists(dst) or not os.path.exists(path):
+        return None
+    os.makedirs(os.path.dirname(dst), exist_ok=True)
+    with open(path, "rb") as f:
+        data = f.read()
+    with open(dst, "wb") as f:
+        f.write(data)
+    return dst
+
+
+def list_kept(folder: str) -> list[tuple[str, str]]:
+    """残し続けているバックアップ [(場所, 説明)]（新しい順）"""
+    d = os.path.join(folder, KEEP_DIR)
+    try:
+        names = [n for n in os.listdir(d) if n.startswith(BACKUP_PREFIX + "keep_") and n.endswith(".json")]
+    except OSError:
+        return []
+    out = []
+    for n in names:
+        label = n[len(BACKUP_PREFIX + "keep_"):-5]
+        if label.startswith("before-v"):
+            text = f"{label[7:]} を初めて起動する前"
+        elif label.startswith("month-"):
+            y, m = label[6:].split("-")[:2]
+            text = f"{y}年{int(m)}月の最初"
+        elif label.startswith("newer-"):
+            text = "新しい版の辞書を、この版で初めて開く前"
+        else:
+            text = label
+        p = os.path.join(d, n)
+        out.append((p, text))
+    out.sort(key=lambda x: os.path.getmtime(x[0]), reverse=True)
+    return out
+
+
 def list_backups(folder: str) -> list[str]:
     """バックアップの一覧（新しい順）"""
     try:
@@ -1687,4 +1750,259 @@ def usage_summary(used: list[UsedEntry]) -> dict:
         "context": sum(1 for u in used if u.entry.before or u.entry.after),
         "head": sum(1 for u in used if u.entry.head_only),
         "risky": sum(1 for u in used if u.risky),
+    }
+
+
+# ─────────────────────────────────────────────
+# 使用回数（同じ台詞は、何度変換しても1回と数える）
+# ─────────────────────────────────────────────
+def line_key(line: str) -> str:
+    """台詞1行を表す短い印。設定ファイルに「もう数えた台詞」として残すので、本文ではなくハッシュにする"""
+    import hashlib
+    return hashlib.sha1(normalize(line).strip().encode("utf-8")).hexdigest()[:16]
+
+
+def count_usage(text: str, applied: list[Applied], seen: set[str]) -> int:
+    """変換結果 text の行ごとに、まだ数えていない台詞なら、その行で当たった項目の使用回数を1ずつ増やす。
+    同じ行で同じ項目が2回当たっても1回。数えた行の印は seen に足す。戻り値: 増やした回数の合計"""
+    lines = text.split("\n")
+    starts, pos = [], 0
+    for ln in lines:
+        starts.append(pos)
+        pos += len(ln) + 1
+    by_line: dict[int, list[Entry]] = {}
+    for a in applied:
+        k = max(i for i, st in enumerate(starts) if st <= a.start)
+        got = by_line.setdefault(k, [])
+        if all(a.entry is not e for e in got):
+            got.append(a.entry)
+    n = 0
+    for k, entries in by_line.items():
+        key = line_key(lines[k])
+        if key in seen:
+            continue
+        seen.add(key)
+        for e in entries:
+            e.hits += 1
+            n += 1
+    return n
+
+
+# ─────────────────────────────────────────────
+# 辞書の競合チェック（辞書の DRC）
+# ─────────────────────────────────────────────
+# 考え方: 項目ごとに「その項目が当たるはずの、いちばん短い文」を作り、本物の辞書で変換してみる。
+# 優先順位の規則を書き直して判定するのではなく、変換そのものを使うので、判定と本番がずれない。
+PROBE_MARK = "〓"    # 試しの文の頭に置く、どの項目にも当たらない文字（句頭のみの項目が文頭で当たらないように）
+
+CONFLICT_LEVEL = {"error": "効かない", "warn": "無駄・要確認", "info": "お知らせ"}
+
+
+@dataclass
+class Conflict:
+    level: str                 # "error" / "warn" / "info"
+    kind: str                  # 短い種類名（一覧の列）
+    entry: Entry               # 問題のある項目
+    msg: str                   # 説明（どうすればよいかまで）
+    other: Entry | None = None # 原因になっている別の項目
+
+
+def _probe(e: Entry) -> tuple[str, int]:
+    """e が当たるはずの最小の文と、その中で e が始まる位置"""
+    before, after = normalize(e.before), normalize(e.after)
+    head = PROBE_MARK + before + ("/" if e.head_only else "")   # 句頭のみの項目は、区切りの直後に置く
+    return head + e.src + after, len(head)
+
+
+def _label(e: Entry) -> str:
+    ctx = ctx_label(e.before, e.after)
+    return f"{e.src} → {e.dst}" + (f"（{ctx}）" if ctx else "") + ("（句頭のみ）" if e.head_only else "")
+
+
+def dict_conflicts(dic: "Dictionary", many: int = 4) -> list[Conflict]:
+    """辞書の中の競合・無駄を調べる。重いものから並べる（error → warn → info）。
+    error: 条件どおりの文でも、ほかの項目が先に当たって、この項目が使われない
+    warn:  何も変えない項目／無くても結果が同じ項目／置き換え後にエラーがある項目
+    info:  同じ YMM4側に、条件違いの項目が many 個以上ある"""
+    out: list[Conflict] = []
+    if dic._index is None:
+        dic._build_index()
+    for e in sorted(dic.entries, key=lambda x: x.key):
+        bad = [i for i in validate(e.dst) if i.level == "error"]
+        if bad:
+            out.append(Conflict("warn", "置き換え後にエラー", e,
+                                f"置き換え後が YMM4 で正しく読まれない形です（{bad[0].msg}）。辞書タブで直してください"))
+        text, at = _probe(e)
+        res, applied = dic.apply(text)
+        mine = [a for a in applied if a.entry is e]
+        if not mine:
+            # 何が先に当たったか: e の始まりを覆う当たり
+            cover = next((a for a in applied if a.entry.src and
+                          _src_span(text, applied, a)[0] <= at < _src_span(text, applied, a)[1]), None)
+            who = cover.entry if cover else None
+            if e.before or e.after:
+                why = (f"条件どおりの文「{text[len(PROBE_MARK):]}」でも、" +
+                       (f"長い項目「{_label(who)}」が先に当たります" if who else "ほかの項目が先に当たります") +
+                       "。長い項目を消すか、長い項目に別の場面の条件を付けて、当たる所を分けてください")
+            else:
+                why = ("この項目だけの文でも、" + (f"「{_label(who)}」が先に当たります" if who else "ほかの項目が先に当たります"))
+            out.append(Conflict("error", "ほかの項目に隠れて効かない", e, why, who))
+            continue
+        res2, applied2 = dic.apply(text, skip=e)
+        if res2 == res:
+            # 「YMM4側と置き換え後が同じ」項目でも、短い項目の誤爆よけとして働いているなら res2 != res になり、ここへは来ない
+            if normalize(e.src) == normalize(e.dst):
+                out.append(Conflict("warn", "何も変えない", e,
+                                    "YMM4側と置き換え後が同じで、ほかの項目の誤爆よけにもなっていません。消しても結果は変わりません"))
+                continue
+            s0, s1 = at, at + len(e.src)
+            alt = [a.entry for a in applied2 if _src_span(text, applied2, a)[0] < s1 and _src_span(text, applied2, a)[1] > s0]
+            names = "・".join(dict.fromkeys(_label(x) for x in alt))
+            out.append(Conflict("warn", "無くても結果が同じ", e,
+                                "この項目を消しても、同じ所が同じ形になります" +
+                                (f"（{names} で足りています）" if names else "") + "。整理するなら消してかまいません",
+                                alt[0] if alt else None))
+    by_src: dict[str, list[Entry]] = {}
+    for e in dic.entries:
+        by_src.setdefault(e.src, []).append(e)
+    for src, es in sorted(by_src.items()):
+        if len(es) >= many:
+            out.append(Conflict("info", "条件違いが多い", es[0],
+                                f"「{src}」には条件違いの項目が {len(es)} 個あります。意図どおりか、ときどき見直してください"))
+    order = {"error": 0, "warn": 1, "info": 2}
+    out.sort(key=lambda c: order[c.level])
+    return out
+
+
+def _src_span(text: str, applied: list[Applied], a: Applied) -> tuple[int, int]:
+    """当たり a が、元の文 text のどこからどこまでを置き換えたか（apply の結果の位置から逆算）"""
+    i = o = 0
+    for x in applied:
+        # 当たりの前の、置き換えなかった部分は1文字ずつ進む
+        gap = x.start - o
+        i += gap
+        o = x.start
+        if x is a:
+            return i, i + len(x.entry.src)
+        i += len(x.entry.src)
+        o = x.end
+    return -1, -1
+
+
+# ─────────────────────────────────────────────
+# 台本単位の一括チェック（1行 = 1台詞として、行ごとにまとめる）
+# ─────────────────────────────────────────────
+@dataclass
+class LineReport:
+    no: int            # 1 から数える行番号
+    start: int         # 変換結果の上での位置
+    end: int
+    text: str
+    places: int        # 辞書で置き換えた所の数
+    unchecked: int     # 未確認の文節
+    risky: int         # 誤爆注意の文節
+    manual: int        # 手で直した文節
+    errors: int
+    warns: int
+
+    @property
+    def todo(self) -> bool:
+        """まだ人が見るべき所が残っているか"""
+        return bool(self.unchecked or self.risky or self.errors)
+
+
+def line_reports(text: str, infos: list[PhraseInfo], applied: list[tuple[int, int, "Entry"]],
+                 issues: list[Issue]) -> list[LineReport]:
+    """変換結果を行ごとにまとめる。空の行は飛ばす"""
+    out = []
+    pos = 0
+    for no, ln in enumerate(text.split("\n"), 1):
+        s, e = pos, pos + len(ln)
+        pos = e + 1
+        if not ln.strip():
+            continue
+        inside = [p for p in infos if s <= p.start < e or (p.start == s and p.end <= e)]
+        out.append(LineReport(
+            no, s, e, ln,
+            places=sum(1 for a, b, _ in applied if s <= a < e),
+            unchecked=sum(p.status == "unchecked" for p in inside),
+            risky=sum(p.status == "risky" for p in inside),
+            manual=sum(p.status == "manual" for p in inside),
+            errors=sum(i.level == "error" and s <= i.start <= e for i in issues),
+            warns=sum(i.level != "error" and s <= i.start <= e for i in issues),
+        ))
+    return out
+
+
+def script_summary(rows: list[LineReport]) -> dict:
+    return {
+        "lines": len(rows),
+        "places": sum(r.places for r in rows),
+        "errors": sum(r.errors for r in rows),
+        "todo_lines": sum(r.todo for r in rows),
+        "unchecked": sum(r.unchecked for r in rows),
+        "risky": sum(r.risky for r in rows),
+        "done_lines": sum(not r.todo for r in rows),
+    }
+
+
+# ─────────────────────────────────────────────
+# アクセントの聞き比べ（A/B 試聴）
+# ─────────────────────────────────────────────
+@dataclass
+class AccentVariant:
+    k: int | None        # ' を置く拍（None は平板）
+    text: str            # その形にした文節
+    whole: str           # その形にした変換結果全体
+    current: bool        # いまの形か
+
+
+def with_accent(s: str, ph: Phrase, k: int | None) -> str:
+    """文節 ph のアクセントを k 拍目の後ろだけにした s（k が None なら平板）"""
+    dels, ins = set_accent_edits(ph, k)
+    if not dels and ins is None:
+        return s
+    chars = list(s)
+    if ins is not None:
+        chars.insert(ins, ACCENT)
+    for d in sorted(dels, reverse=True):
+        chars.pop(d if ins is None or d < ins else d + 1)
+    return "".join(chars)
+
+
+def accent_variants(s: str, ph: Phrase) -> list[AccentVariant]:
+    """文節 ph に付けられるアクセントの形を全部並べる（平板 → 1拍目 → 2拍目 …）"""
+    cur_k = ph.accents[0] if len(ph.accents) == 1 and len(ph.marks) == 1 else (None if not ph.marks else -1)
+    out = []
+    for k in [None] + [i for i, u in enumerate(ph.units) if u.can_accent]:
+        whole = with_accent(s, ph, k)
+        d = len(whole) - len(s)
+        out.append(AccentVariant(k, whole[ph.start:ph.end + d], whole, k == cur_k))
+    return out
+
+
+def line_at(s: str, pos: int) -> tuple[int, int]:
+    """pos を含む行の範囲"""
+    a = s.rfind("\n", 0, pos) + 1
+    b = s.find("\n", pos)
+    return a, (len(s) if b < 0 else b)
+
+
+# ─────────────────────────────────────────────
+# 辞書の統計
+# ─────────────────────────────────────────────
+def dict_stats(dic: "Dictionary", today: _dt.date | None = None, top: int = 10) -> dict:
+    today = today or _dt.date.today()
+    month = today.strftime("%Y-%m")
+    es = dic.entries
+    used = sorted((e for e in es if e.hits), key=lambda e: (-e.hits, e.key))
+    return {
+        "total": len(es),
+        "this_month": sum(1 for e in es if e.added.startswith(month)),
+        "hits_total": sum(e.hits for e in es),
+        "top": used[:top],
+        "unused": sorted((e for e in es if not e.hits), key=lambda e: e.key),
+        "context": sum(1 for e in es if e.before or e.after),
+        "head": sum(1 for e in es if e.head_only),
+        "risky": sum(1 for e in es if entry_warnings(e)),
     }

@@ -23,7 +23,7 @@ from tkinter import ttk, messagebox, filedialog
 import accent_core as core
 
 APP_NAME = "ゆっくりアクセント辞書"
-VERSION = "0.8.0"
+VERSION = "0.9.0"
 
 if getattr(sys, "frozen", False):
     BASE_DIR = os.path.dirname(sys.executable)
@@ -93,13 +93,25 @@ SHORTCUTS = [
     ("acc_right", "アクセントを後ろの文字へ（カーソルのある文節）", "<Alt-Key-Right>"),
     ("acc_here", "カーソルの前の文字にアクセント", "<Alt-Key-Up>"),
     ("acc_clear", "アクセントを外す（平板）", "<Alt-Key-Down>"),
-    ("send_learn", "手直しを学習タブへ送る", ""),
+    ("send_learn", "手直しを辞書の候補に送る", ""),
     ("font_up", "文字を大きく", "<Control-Key-plus>"),
     ("font_down", "文字を小さく", "<Control-Key-minus>"),
     ("font_reset", "文字の大きさを100%に戻す", "<Control-Key-0>"),
 ]
 
 IS_WINDOWS = sys.platform.startswith("win")
+PHRASE_COLOR_HELP = (
+    "このツールは、YMM4 の読みを全部自動で正解にするのではなく、「人が確かめるべき所だけを、いちばん早く見つける」ことを目指しています。"
+    "そのために、変換結果の文節を、何が起きたかで色分けします（正しいかどうかではありません。辞書が当たった所でも、誤爆していることはあります）。\n\n"
+    "・黄：辞書で置き換えた所\n"
+    "・黄＋赤い下線：誤爆しやすい項目（助詞だけ・短い語 など）が当たった文節\n"
+    "・淡い青（未確認）：辞書も手直しも入っていない、YMM4 の読みそのままの文節。耳で確かめたい所です\n"
+    "・淡い緑（手直し）：手で直した文節\n\n"
+    "［次の未確認へ ▶］（F11）で未確認・誤爆注意の文節を順に選び、そのまま［試聴］（F5）でその文節だけを聞けます。"
+    "良ければ右クリック →「この文節を確認済みにする」で色が消えます。\n"
+    "手で直した文節は、［手直しを辞書の候補に送る →］で、まとめて辞書の候補（学習タブ）に送れます。直すたびに聞いたりはしません。")
+HELP_ICON = 18       # ［？］の印の大きさ（100% のときのピクセル）
+COUNTED_MAX = 5000   # 使用回数を数え終えた台詞の印を、いくつまで覚えておくか
 DEFAULT_PRESETS = ("まりさ", "れいむ")
 PLAYER_TIMEOUT = 60   # AquesTalkPlayer の書き出しを待つ上限（秒）
 
@@ -151,6 +163,8 @@ class App:
         self.shortcuts = {k: v for k, v in (self.conf.get("shortcuts") or {}).items()}
         self._bound = []
         self._hint_buttons = []      # (操作, ボタン, 文字) … ボタンにショートカットを書き添える
+        self._help_icons = []        # ［？］の印（文字の大きさを変えたら描き直す）
+        self._help_imgs = {}         # (大きさ, マウスが乗っているか) → 画像
 
         self.color_marks = tk.BooleanVar(value=self.conf.get("color_marks", True))
         self.player_path = tk.StringVar(value=self.conf.get("aquestalk_player", ""))
@@ -173,7 +187,11 @@ class App:
         self._ap_tags: dict[str, core.Entry] = {}   # 辞書が当たった所のタグ名 → 当たった項目（タグは手直ししても文字に付いて動く）
         self._infos: list[core.PhraseInfo] = []     # 変換結果の文節ごとの状態
         self._insight_job = None
+        self._script_win = None    # 台本の一覧の窓（開いていれば、変換結果が変わるたびに書き直す）
         self.phrase_colors = tk.BooleanVar(value=self.conf.get("phrase_colors", True))
+        # 使用回数を数え終えた台詞の印（同じ台詞を何度変換しても1回と数えるため。新しい順に最大 COUNTED_MAX 件）
+        self._counted_order: list[str] = list(self.conf.get("counted_lines") or [])[-COUNTED_MAX:]
+        self._counted = set(self._counted_order)
 
         nb = ttk.Notebook(root)
         nb.pack(fill="both", expand=True, padx=8, pady=(8, 0))
@@ -190,6 +208,10 @@ class App:
             self._refresh_status([("辞書ファイルが壊れていて読み込めませんでした。", "crit"),
                                   (f"\n元のファイルは {os.path.basename(broken)} に名前を変えて残してあります。"
                                    "辞書タブの［バックアップから戻す…］で、前の状態に戻せます。", None)])
+        elif self.dic.newer_format:
+            self._refresh_status([("この辞書は、もっと新しい版のゆっくりアクセント辞書で作られています。", "warn"),
+                                  ("\nこの版が知らない情報も消さずに残します。念のため、開く前の辞書を backup フォルダの keep に残しました。"
+                                   "できれば新しい版を使ってください", None)])
         elif place:
             self._refresh_status(place)
         else:
@@ -256,6 +278,8 @@ class App:
         self.conf["muted"] = self.muted
         self.conf["auto_watch"] = bool(self.auto_watch.get())
         self.conf["phrase_colors"] = bool(self.phrase_colors.get())
+        self.conf["counted_lines"] = self._counted_order[-COUNTED_MAX:]
+        self.conf["last_version"] = VERSION
         try:
             with open(CONF_PATH, "w", encoding="utf-8") as f:
                 json.dump(self.conf, f, ensure_ascii=False, indent=1)
@@ -277,7 +301,19 @@ class App:
                 dst = DICT_PATH
             return core.Dictionary(), dst
         self._backup_dict()          # 起動時に1つ写しておく（前回と同じなら写さない）
+        self._keep_backups(dic)
         return dic, None
+
+    def _keep_backups(self, dic):
+        """節目の辞書を、古い順に消えない所に残す（新しい版を初めて起動する前・月の最初・新しい形式の辞書を開く前）"""
+        try:
+            if dic.newer_format:
+                core.keep_backup(DICT_PATH, BACKUP_DIR, f"newer-{dic.file_version}")
+            if self.conf.get("last_version") != VERSION:
+                core.keep_backup(DICT_PATH, BACKUP_DIR, f"before-v{VERSION}")
+            core.keep_backup(DICT_PATH, BACKUP_DIR, f"month-{datetime.date.today():%Y-%m}")
+        except OSError:
+            pass
 
     def _backup_dict(self):
         try:
@@ -372,6 +408,8 @@ class App:
         if hasattr(self, "scale_var"):
             self.scale_var.set(round(new * 100))
         self._draw_accent_panel()
+        for cv in self._help_icons:
+            self._draw_help(cv)
         self._save_conf()
         self._refresh_status(f"文字の大きさ：{round(new * 100)}%")
 
@@ -423,7 +461,7 @@ class App:
             "prev_unchecked": lambda: self.goto_unchecked(True),
             "acc_left": lambda: self.move_accent(-1), "acc_right": lambda: self.move_accent(1),
             "acc_here": self.accent_at_cursor, "acc_clear": self.clear_accent,
-            "send_learn": self.send_to_learn,
+            "send_learn": self.send_manual,
             "font_up": lambda: self.set_scale(self.scale + 0.1),
             "font_down": lambda: self.set_scale(self.scale - 0.1),
             "font_reset": lambda: self.set_scale(1.0),
@@ -590,6 +628,7 @@ class App:
         top.pack(fill="x")
         ttk.Label(top, text="① YMM4の読み（初期状態）を貼り付け").pack(side="left")
         ttk.Button(top, text="クリア", command=lambda: self.in_text.delete("1.0", "end")).pack(side="right")
+        ttk.Button(top, text="ファイルを開く…", command=self.open_script_file).pack(side="right", padx=(0, 6))
         self._hint("paste_convert", ttk.Button(top, command=self.paste_and_convert), "貼り付けて変換").pack(side="right", padx=6)
         frm, self.in_text = self._text(tab, 5)
         frm.pack(fill="both", expand=True, pady=(4, 8))
@@ -602,7 +641,13 @@ class App:
         ttk.Checkbutton(mid, text="記号を色分け", variable=self.color_marks,
                         command=self._repaint_all).pack(side="left")
         ttk.Checkbutton(mid, text="戻ってきたら自動で貼り付けて変換", variable=self.auto_watch,
-                        command=self._save_conf).pack(side="left", padx=12)
+                        command=self._save_conf).pack(side="left", padx=(12, 0))
+        self._help(mid, "戻ってきたら自動で貼り付けて変換",
+                   "YMM4 で読みをコピーして、このツールの画面に戻ってくると、ボタンを押さなくても貼り付けて変換します。\n\n"
+                   "・変換タブを開いているときだけ動きます\n"
+                   "・漢字を含む文章や、このツールが自分でコピーした結果には反応しません\n"
+                   "・変換結果を手直ししている途中は、手直しを消さないよう、自動では変換しません\n\n"
+                   "自分のタイミングで変換したいときは、チェックを外して［貼り付けて変換］を使ってください。").pack(side="left", padx=4)
         self.btn_acc = ttk.Button(mid, command=self.toggle_accent_panel)
         self.btn_acc.pack(side="right")
         self._build_accent_panel(tab, mid)
@@ -635,16 +680,18 @@ class App:
         ins = ttk.Frame(tab)
         ins.pack(fill="x", pady=(0, 6))
         self.insight = tk.StringVar(value="［変換］すると、使われた辞書と、まだ確かめていない文節の数をここに出します")
+        self._help(ins, "文節の色と「今回の変換」", PHRASE_COLOR_HELP).pack(side="left", padx=(0, 6))
         ttk.Label(ins, textvariable=self.insight).pack(side="left")
         self._hint("next_unchecked", ttk.Button(ins, command=lambda: self.goto_unchecked(False)),
                    "次の未確認へ ▶").pack(side="right", padx=6)
         ttk.Button(ins, text="使われた辞書…", command=self.show_used_entries).pack(side="right")
+        ttk.Button(ins, text="台本の一覧…", command=self.show_script).pack(side="right", padx=(0, 6))
 
         bot = ttk.Frame(tab)
         bot.pack(fill="x")
         self._hint("copy", ttk.Button(bot, style="Big.TButton", command=self.copy_output), "コピー").pack(side="left")
         self._hint("recheck", ttk.Button(bot, command=self.recheck), "再チェック").pack(side="left", padx=6)
-        ttk.Button(bot, text="この手直しを学習タブへ送る →", command=self.send_to_learn).pack(side="right")
+        self._hint("send_learn", ttk.Button(bot, command=self.send_manual), "手直しを辞書の候補に送る →").pack(side="right")
 
         pv = ttk.Frame(tab)
         pv.pack(fill="x", pady=(8, 0))
@@ -719,7 +766,9 @@ class App:
         self._show_issues(res.issues)
         if self.auto_copy.get() and res.text:
             self._copy(res.text)
-        if res.applied:
+        before = set(self._counted)
+        if core.count_usage(res.text, res.applied, self._counted):
+            self._counted_order += [k for k in self._counted if k not in before]
             self._fill_dict()   # 使用回数の表示を更新
         n_err = sum(i.level == "error" for i in res.issues)
         n_warn = len(res.issues) - n_err
@@ -827,15 +876,6 @@ class App:
             else:
                 self._refresh_status("コピーしました")
         return "break"
-
-    def send_to_learn(self):
-        self.l_before.delete("1.0", "end")
-        self.l_before.insert("1.0", self.in_text.get("1.0", "end-1c"))
-        self.l_after.delete("1.0", "end")
-        self.l_after.insert("1.0", self.out_text.get("1.0", "end-1c"))
-        self._out_sent = self.out_text.get("1.0", "end-1c")
-        self.nb.select(1)
-        self.do_learn()
 
     # ── アクセント編集（文節ごとの表示とボタン） ─────
     def _build_accent_panel(self, tab, anchor):
@@ -1083,6 +1123,7 @@ class App:
         add_restore("この文節を変換直後に戻す", self._out_converted, "変換直後の形に戻しました")
         add_restore("この文節を辞書適用前に戻す", self._out_prepared, "辞書を当てる前の形に戻しました")
         m.add_separator()
+        m.add_command(label="アクセントを聞き比べる…", command=lambda: self.compare_accents(ph))
         m.add_command(label="この文節を辞書に登録…", command=lambda: self._register_phrase(ph))
         m.add_command(label="この文節を学習候補に送る", command=lambda: self._learn_phrase(ph))
         try:
@@ -1100,6 +1141,60 @@ class App:
         t.edit_separator()
         self._show_issues(core.validate(t.get("1.0", "end-1c")))
         self._refresh_status(f"「{self._short(old, 20)}」を{done}：{self._short(new, 30)}（Ctrl+Z で元に戻せます）")
+
+    def _help(self, parent, title, text):
+        """［？］ボタン。押した人にだけ、詳しい説明を小さな窓で見せる（画面の説明文を短くするため）"""
+        def show():
+            w = tk.Toplevel(self.root)
+            w.title(title)
+            w.transient(self.root)
+            ttk.Label(w, text=text, justify="left", wraplength=self._sc(560), padding=(16, 14)).pack(fill="both", expand=True)
+            b = ttk.Button(w, text="閉じる", command=w.destroy)
+            b.pack(anchor="e", padx=12, pady=(0, 12))
+            b.focus_set()
+            w.bind("<Escape>", lambda e: w.destroy())
+            w.bind("<Return>", lambda e: w.destroy())
+        size = self._sc(HELP_ICON)
+        bg = self.style.lookup("TFrame", "background") or parent.winfo_toplevel().cget("bg")
+        cv = tk.Canvas(parent, width=size, height=size, highlightthickness=0, bd=0, bg=bg, cursor="hand2")
+        cv.bind("<Button-1>", lambda e: show())
+        cv.bind("<Enter>", lambda e: self._draw_help(cv, True))
+        cv.bind("<Leave>", lambda e: self._draw_help(cv, False))
+        self._help_icons.append(cv)
+        self._draw_help(cv, False)
+        return cv
+
+    def _help_image(self, size, hover):
+        """「?」の印の画像（assets/help の、大きさごとに作っておいた縁のなめらかな PNG）。無ければ None"""
+        n = min(max(size, 12), 40)
+        key = (n, hover)
+        if key not in self._help_imgs:
+            path = os.path.join(RES_DIR, "assets", "help", f"help_{n}{'_hover' if hover else ''}.png")
+            try:
+                self._help_imgs[key] = tk.PhotoImage(file=path)
+            except tk.TclError:
+                self._help_imgs[key] = None
+        return self._help_imgs[key]
+
+    def _draw_help(self, cv, hover=False):
+        """［？］の印：丸い輪の中に太い「？」。画像があれば画像を、無ければ線で描く（線だと縁がギザギザになる）"""
+        try:
+            size = self._sc(HELP_ICON)
+            cv.configure(width=size, height=size)
+            cv.delete("all")
+            img = self._help_image(size, hover)
+            if img is not None:
+                cv.create_image(size // 2, size // 2, image=img)
+                return
+            col = "#1f5fbf" if hover else "black"
+            w = max(1.5, size * 0.08)
+            m = w / 2 + 1
+            cv.create_oval(m, m, size - m, size - m, outline=col, width=w)
+            f = tkfont.Font(family=self.fonts["ui"].actual("family"), size=-max(8, round(size * 0.62)), weight="bold")
+            cv.create_text(size / 2, size / 2 + 0.5, text="?", fill=col, font=f)
+            cv._font = f     # 消されないように持っておく
+        except tk.TclError:
+            pass
 
     # ── 変換結果の見える化 ────────────────────────
     def _off(self, idx) -> int:
@@ -1143,7 +1238,12 @@ class App:
         extra = [f"文脈付き{sm['context']}"] * bool(sm["context"]) + [f"誤爆注意{sm['risky']}"] * bool(sm["risky"])
         line = f"辞書 {sm['places']}か所（{'・'.join([str(sm['entries']) + '項目'] + extra)}）"
         line += f"　未確認 {n_un}文節" + (f"・誤爆注意 {n_risky}文節" if n_risky else "")
+        n_man = sum(p.status == "manual" for p in self._infos)
+        if n_man:
+            line += f"　手直し {n_man}文節"
         self.insight.set(line)
+        if self._script_win is not None:
+            self._fill_script()
 
     def goto_unchecked(self, backward=False):
         """次（前）の未確認・誤爆注意の文節を選ぶ。選んだまま［試聴］すると、その文節だけを聞ける"""
@@ -1333,6 +1433,36 @@ class App:
         if warns:
             parts.append((f"\n誤爆しやすい形です（{'・'.join(warns)}）。ほかの所で困ったら、辞書タブで「句頭のみ」を付けてください", "warn"))
         self._refresh_status(parts)
+
+    def send_manual(self):
+        """手で直した文節だけを、まとめて学習タブの候補に送る。直すたびに聞かず、押した人にだけ働く"""
+        if not self._raw_converted:
+            self._refresh_status([("先に①に YMM4 の読みを貼って［変換］してください", "warn")])
+            return
+        self._update_insight()
+        manual = [p for p in self._infos if p.status == "manual"]
+        if not manual:
+            self._refresh_status("手で直した文節はありません（変換結果の欄で直すと、淡い緑になります）")
+            return
+        cur = self.out_text.get("1.0", "end-1c")
+        regions = []
+        for p in manual:
+            r = core.phrase_region(cur, self._out_prepared, p.start, p.end)
+            regions.append(core.normalize(cur[r[0]:r[1]] if r else cur[p.start:p.end]))
+        picked = [c for c in core.learn(self._raw_converted, cur, self.numbers, self.dic)
+                  if c.dst and any(core.normalize(c.dst) in g for g in regions)]
+        have = {(c.src, c.dst) for c in self.cands}
+        new = [c for c in picked if (c.src, c.dst) not in have]
+        self.cands.extend(new)
+        self._fill_cands()
+        self._out_sent = cur      # 終了時の「学習タブへ送っていない手直し」の確認に使う
+        if not new:
+            self._refresh_status(f"手直しした {len(manual)} 文節から、新しい候補はありませんでした"
+                                 "（もう学習タブにあるか、辞書と同じか、数字だけの変更です）")
+            return
+        self.nb.select(1)
+        self._refresh_status([(f"手直しした {len(manual)} 文節から、学習タブに候補を {len(new)} 件送りました。", None),
+                              ("\n確かめて［チェックしたものを辞書に登録］を押すと、辞書に入ります（押さなければ、辞書は変わりません）", "warn")])
 
     def _learn_phrase(self, ph):
         if not self._raw_converted:
@@ -1573,13 +1703,18 @@ class App:
         except OSError as ex:
             messagebox.showerror(APP_NAME, f"AquesTalkPlayer を起動できませんでした。\n{exe}\n{ex}")
 
-    def preview(self):
+    def preview(self, text=None, note=None):
+        """試聴する。text を渡すとそれを読む（聞き比べ用）。渡さなければ変換結果の選択範囲か全体"""
         if not IS_WINDOWS:
             return
         exe = self._player_exe()
         if not exe:
             return
-        text = self._preview_text()
+        if text is None:
+            text = self._preview_text()
+        else:
+            text = core._join_lines(text)
+            self._preview_note = note or ""
         if not text:
             messagebox.showinfo(APP_NAME, "読み上げる所がありません。\n"
                                 "変換結果の欄に、仮名の読みが入っていません。①に YMM4 の読みを貼って変換してから押してください。")
@@ -1931,10 +2066,297 @@ class App:
         ttk.Button(bot, text="追加", command=self.add_entry).pack(side="left")
         ttk.Button(bot, text="編集", command=self.edit_entry).pack(side="left", padx=4)
         ttk.Button(bot, text="削除", command=self.delete_entries).pack(side="left")
+        ttk.Button(bot, text="競合を調べる…", command=self.check_conflicts).pack(side="left", padx=(16, 0))
+        ttk.Button(bot, text="統計…", command=self.show_stats).pack(side="left", padx=6)
         ttk.Button(bot, text="別名で書き出す…", command=self.export_dict).pack(side="right")
         ttk.Button(bot, text="バックアップから戻す…", command=self.restore_dict).pack(side="right", padx=(6, 0))
         ttk.Button(bot, text="他の辞書を取り込む…", command=self.import_dict).pack(side="right", padx=6)
         self._fill_dict()
+
+    # ── 台本単位の一括チェック ──────────────────────
+    def open_script_file(self):
+        """YMM4 の読みを1行1台詞で書いたテキストファイルを、①に読み込んで変換する"""
+        path = filedialog.askopenfilename(parent=self.root, title="台本（読みのテキスト）を開く",
+                                          filetypes=[("テキスト", "*.txt"), ("すべて", "*.*")])
+        if not path:
+            return
+        raw = None
+        for enc in ("utf-8-sig", "cp932", "utf-16"):
+            try:
+                with open(path, encoding=enc) as f:
+                    raw = f.read()
+                break
+            except (UnicodeError, OSError):
+                continue
+        if raw is None:
+            messagebox.showerror(APP_NAME, f"読み込めませんでした（文字コードが分かりません）。\n{path}", parent=self.root)
+            return
+        self.in_text.delete("1.0", "end")
+        self.in_text.insert("1.0", raw.replace("\r\n", "\n"))
+        self.do_convert()
+        self.show_script()
+
+    def _script_rows(self):
+        t = self.out_text
+        cur = t.get("1.0", "end-1c")
+        return core.line_reports(cur, self._infos, self._applied_now(), core.validate(cur))
+
+    def show_script(self):
+        """台本（変換結果の全行）を1行1台詞として、行ごとの状態を一覧にする"""
+        if not self._out_converted:
+            self._refresh_status([("先に①に YMM4 の読みを貼って（または［ファイルを開く…］で読み込んで）［変換］してください", "warn")])
+            return
+        if self._script_win is not None:
+            self._script_win.lift()
+            self._fill_script()
+            return
+        w = tk.Toplevel(self.root)
+        w.title("台本の一覧")
+        w.transient(self.root)
+        self._script_win = w
+        w.protocol("WM_DELETE_WINDOW", self._close_script)
+        self._script_head = tk.StringVar()
+        ttk.Label(w, textvariable=self._script_head, font=self.fonts["head"], padding=(10, 8, 10, 0)).pack(anchor="w")
+        ttk.Label(w, text="1行を1台詞として数えます。行を選ぶと変換結果のその行を選び、［試聴］でその台詞だけを聞けます。"
+                          "未確認・誤爆注意・エラーが残っている行が「要確認」です",
+                  foreground="#666", padding=(10, 2), wraplength=self._sc(860)).pack(anchor="w")
+        fr = ttk.Frame(w)
+        fr.pack(fill="both", expand=True, padx=10, pady=6)
+        cols = ("no", "st", "places", "un", "risky", "err", "text")
+        tv = ttk.Treeview(fr, columns=cols, show="headings", height=14, selectmode="browse")
+        for c, wd, txt in (("no", 50, "行"), ("st", 80, "状態"), ("places", 60, "辞書"), ("un", 70, "未確認"),
+                           ("risky", 80, "誤爆注意"), ("err", 70, "エラー"), ("text", 460, "台詞")):
+            tv.heading(c, text=txt)
+            tv.column(c, width=self._sc(wd), anchor="w" if c == "text" else "center", stretch=c == "text")
+        tv.tag_configure("err", foreground=MSG_STYLE["crit"]["fg"])
+        tv.tag_configure("todo", foreground=MSG_STYLE["warn"]["fg"])
+        tv.tag_configure("done", foreground="#2a7a2a")
+        sb = ttk.Scrollbar(fr, command=tv.yview)
+        tv.configure(yscrollcommand=sb.set)
+        tv.pack(side="left", fill="both", expand=True)
+        sb.pack(side="right", fill="y")
+        self._script_tv = tv
+        tv.bind("<<TreeviewSelect>>", lambda e: self._select_line())
+        bf = ttk.Frame(w, padding=(10, 0, 10, 10))
+        bf.pack(fill="x")
+        ttk.Button(bf, text="次の要確認の台詞へ ▶", command=self._next_todo_line).pack(side="left")
+        ttk.Button(bf, text="この台詞をコピー", command=self._copy_line).pack(side="left", padx=6)
+        ttk.Button(bf, text="閉じる", command=self._close_script).pack(side="right")
+        self._fill_script()
+
+    def _close_script(self):
+        if self._script_win is not None:
+            self._script_win.destroy()
+        self._script_win = None
+
+    def _fill_script(self):
+        tv = self._script_tv
+        keep = tv.selection()
+        rows = self._script_rows()
+        self._script_data = {f"l{r.no}": r for r in rows}
+        tv.delete(*tv.get_children())
+        for r in rows:
+            st = "エラー" if r.errors else "要確認" if r.todo else "済"
+            tv.insert("", "end", iid=f"l{r.no}", values=(r.no, st, r.places or "", r.unchecked or "", r.risky or "",
+                                                        r.errors or "", self._short(r.text, 60)),
+                      tags=("err" if r.errors else "todo" if r.todo else "done",))
+        if keep and keep[0] in self._script_data:
+            tv.selection_set(keep[0])
+        sm = core.script_summary(rows)
+        self._script_head.set(f"全{sm['lines']}台詞　辞書 {sm['places']}か所　エラー {sm['errors']}　"
+                              f"要確認 {sm['todo_lines']}台詞（未確認 {sm['unchecked']}文節・誤爆注意 {sm['risky']}文節）　"
+                              f"済 {sm['done_lines']}台詞")
+
+    def _select_line(self):
+        sel = self._script_tv.selection()
+        if not sel or sel[0] not in self._script_data:
+            return
+        r = self._script_data[sel[0]]
+        t = self.out_text
+        t.tag_remove("sel", "1.0", "end")
+        t.tag_add("sel", f"1.0+{r.start}c", f"1.0+{r.end}c")
+        t.mark_set("insert", f"1.0+{r.start}c")
+        t.see(f"1.0+{r.start}c")
+
+    def _next_todo_line(self):
+        tv = self._script_tv
+        ids = list(tv.get_children())
+        sel = tv.selection()
+        start = ids.index(sel[0]) + 1 if sel and sel[0] in ids else 0
+        for iid in ids[start:] + ids[:start]:
+            if self._script_data[iid].todo:
+                tv.selection_set(iid)
+                tv.see(iid)
+                r = self._script_data[iid]
+                self._refresh_status(f"{r.no}行目：未確認 {r.unchecked}・誤爆注意 {r.risky}・エラー {r.errors}。"
+                                     f"変換結果で［次の未確認へ］（{self._key_label('next_unchecked')}）を押すと、この行の文節を順に選びます")
+                return
+        self._refresh_status("要確認の台詞はありません。全部の台詞が済みです")
+
+    def _copy_line(self):
+        sel = self._script_tv.selection()
+        if not sel:
+            return
+        r = self._script_data[sel[0]]
+        self._copy(core.normalize(r.text))
+        self._refresh_status(f"{r.no}行目をコピーしました。YMM4 のその台詞に貼り付けてください")
+
+    # ── アクセントの聞き比べ ──────────────────────
+    def compare_accents(self, ph):
+        """文節のアクセントの形を全部並べ、選ぶとすぐ聞ける。上下キーで2つを行き来すれば A/B 比較になる"""
+        t = self.out_text
+        s = t.get("1.0", "end-1c")
+        word = s[ph.start:ph.end]
+        vs = core.accent_variants(s, ph)
+        if len(vs) < 2:
+            self._refresh_status("この文節には、アクセントを付けられる文字がありません")
+            return
+        w = tk.Toplevel(self.root)
+        w.title(f"アクセントを聞き比べる：{self._short(word, 20)}")
+        w.transient(self.root)
+        ttk.Label(w, text="行を選ぶと、その形ですぐ読み上げます。↑↓キーで2つの行を行き来すると、聞き比べ（A/B）になります",
+                  padding=(10, 8, 10, 2), wraplength=self._sc(560)).pack(anchor="w")
+        scope = tk.StringVar(value="line")
+        rf = ttk.Frame(w, padding=(10, 0))
+        rf.pack(anchor="w")
+        ttk.Label(rf, text="読む範囲:").pack(side="left")
+        ttk.Radiobutton(rf, text="その行（前後の流れごと）", value="line", variable=scope).pack(side="left", padx=4)
+        ttk.Radiobutton(rf, text="文節だけ", value="phrase", variable=scope).pack(side="left")
+        tv = ttk.Treeview(w, columns=("form", "kind"), show="headings", height=min(10, len(vs)), selectmode="browse")
+        tv.heading("form", text="形")
+        tv.heading("kind", text="")
+        tv.column("form", width=self._sc(240))
+        tv.column("kind", width=self._sc(320))
+        tv.tag_configure("cur", foreground="#1f5fbf")
+        for i, v in enumerate(vs):
+            kind = "平板" if v.k is None else f"{''.join(u.text.lstrip('_') for u in ph.units[:v.k + 1])} の後ろで下がる"
+            tv.insert("", "end", iid=f"v{i}", values=(v.text, kind + ("（いまの形）" if v.current else "")),
+                      tags=("cur",) if v.current else ())
+        tv.pack(fill="both", expand=True, padx=10, pady=6)
+        if not IS_WINDOWS:
+            ttk.Label(w, text="試聴は Windows 専用です（AquesTalkPlayer が Windows 用のため）", foreground="#666",
+                      padding=(10, 0)).pack(anchor="w")
+
+        def chosen():
+            sel = tv.selection()
+            return vs[int(sel[0][1:])] if sel else None
+
+        def play(_e=None):
+            v = chosen()
+            if not v:
+                return
+            if scope.get() == "phrase":
+                text = v.text
+            else:
+                a, b = core.line_at(v.whole, ph.start)
+                text = v.whole[a:b]
+            self.preview(text, note=f"（聞き比べ：{v.text}）")
+
+        def adopt():
+            v = chosen()
+            if not v:
+                return
+            if t.get("1.0", "end-1c") != s:
+                messagebox.showinfo(APP_NAME, "聞き比べを開いた後に変換結果が書き換わったので、採用できません。もう一度開いてください。",
+                                    parent=w)
+                return
+            self._set_accent(ph, v.k)
+            w.destroy()
+        tv.bind("<<TreeviewSelect>>", play)
+        bf = ttk.Frame(w, padding=10)
+        bf.pack(fill="x")
+        ttk.Button(bf, text="▶ もう一度聞く", command=play).pack(side="left")
+        ttk.Button(bf, text="この形を採用", style="Big.TButton", command=adopt).pack(side="left", padx=6)
+        ttk.Button(bf, text="閉じる", command=lambda: (self.stop_preview(), w.destroy())).pack(side="right")
+        tv.focus_set()
+
+    # ── 辞書の統計 ─────────────────────────────────
+    def show_stats(self):
+        st = core.dict_stats(self.dic)
+        w = tk.Toplevel(self.root)
+        w.title("辞書の統計")
+        w.transient(self.root)
+        lines = [f"登録数：{st['total']}項目（今月追加 {st['this_month']}）",
+                 f"使用回数の合計：{st['hits_total']}（1つの台詞で当たった項目を1回と数えます）",
+                 f"文脈付き：{st['context']}　句頭のみ：{st['head']}　誤爆しやすい：{st['risky']}",
+                 f"一度も使われていない：{len(st['unused'])}項目"]
+        ttk.Label(w, text="\n".join(lines), padding=(10, 8)).pack(anchor="w")
+        nb = ttk.Notebook(w)
+        nb.pack(fill="both", expand=True, padx=10)
+        tvs = {}
+        for key, title in (("top", "よく使われた項目"), ("unused", "一度も使われていない項目")):
+            fr = ttk.Frame(nb)
+            nb.add(fr, text=title)
+            tv = ttk.Treeview(fr, columns=("n", "e"), show="headings", height=10, selectmode="browse")
+            tv.heading("n", text="使用回数")
+            tv.heading("e", text="項目")
+            tv.column("n", width=self._sc(80), anchor="center", stretch=False)
+            tv.column("e", width=self._sc(460))
+            sb = ttk.Scrollbar(fr, command=tv.yview)
+            tv.configure(yscrollcommand=sb.set)
+            tv.pack(side="left", fill="both", expand=True)
+            sb.pack(side="right", fill="y")
+            for i, e in enumerate(st[key]):
+                tv.insert("", "end", iid=f"e{i}", values=(e.hits, self._entry_label(e)))
+            tv.bind("<Double-1>", lambda ev, tv=tv, key=key: tv.selection() and
+                    self.open_in_dict(st[key][int(tv.selection()[0][1:])]))
+            tvs[key] = tv
+        ttk.Label(w, text="ダブルクリックで辞書タブのその行を開きます。取り込んだ辞書の項目は、取り込んでからの回数です",
+                  foreground="#666", padding=(10, 4)).pack(anchor="w")
+        ttk.Button(w, text="閉じる", command=w.destroy).pack(anchor="e", padx=10, pady=(0, 10))
+
+    def check_conflicts(self):
+        """辞書の競合チェック（辞書の DRC）。項目ごとに、その項目が当たるはずの最小の文を本物の辞書で変換して確かめる"""
+        found = core.dict_conflicts(self.dic)
+        n = {lv: sum(c.level == lv for c in found) for lv in core.CONFLICT_LEVEL}
+        if not found:
+            self._refresh_status(f"競合は見つかりませんでした（{len(self.dic.entries)}項目を調べました）")
+            messagebox.showinfo(APP_NAME, f"競合は見つかりませんでした。\n{len(self.dic.entries)}項目を調べました。", parent=self.root)
+            return
+        w = tk.Toplevel(self.root)
+        w.title("辞書の競合チェック")
+        w.transient(self.root)
+        ttk.Label(w, text=f"{len(self.dic.entries)}項目を調べました：効かない {n['error']}　無駄・要確認 {n['warn']}　お知らせ {n['info']}",
+                  padding=(10, 8, 10, 0)).pack(anchor="w")
+        ttk.Label(w, text="各項目が当たるはずの、いちばん短い文を作って、いまの辞書で変換して確かめています。"
+                          "行を選ぶと下に説明、ダブルクリックで辞書タブのその行を開きます",
+                  foreground="#666", padding=(10, 2), wraplength=self._sc(820)).pack(anchor="w")
+        cols = ("lv", "kind", "entry")
+        tv = ttk.Treeview(w, columns=cols, show="headings", height=min(14, len(found)), selectmode="browse")
+        for c, wd, txt in (("lv", 110, "重さ"), ("kind", 220, "種類"), ("entry", 420, "項目")):
+            tv.heading(c, text=txt)
+            tv.column(c, width=self._sc(wd), anchor="w", stretch=c == "entry")
+        tv.tag_configure("error", foreground=MSG_STYLE["crit"]["fg"])
+        tv.tag_configure("warn", foreground=MSG_STYLE["warn"]["fg"])
+        rows = {}
+        for i, c in enumerate(found):
+            tv.insert("", "end", iid=f"c{i}", values=(core.CONFLICT_LEVEL[c.level], c.kind, self._entry_label(c.entry)),
+                      tags=(c.level,))
+            rows[f"c{i}"] = c
+        tv.pack(fill="both", expand=True, padx=10, pady=6)
+        msg = tk.StringVar(value="行を選ぶと、ここに説明を出します")
+        ttk.Label(w, textvariable=msg, wraplength=self._sc(820), padding=(10, 0)).pack(anchor="w", fill="x")
+
+        def sel():
+            s_ = tv.selection()
+            return rows[s_[0]] if s_ else None
+
+        def on_select(_e=None):
+            c = sel()
+            if c:
+                msg.set(c.msg + (f"\n原因の項目：{self._entry_label(c.other)}" if c.other else ""))
+        tv.bind("<<TreeviewSelect>>", on_select)
+        tv.bind("<Double-1>", lambda e: sel() and self.open_in_dict(sel().entry))
+        bf = ttk.Frame(w, padding=10)
+        bf.pack(fill="x")
+        ttk.Button(bf, text="この項目を辞書タブで開く", command=lambda: sel() and self.open_in_dict(sel().entry)).pack(side="left")
+        ttk.Button(bf, text="原因の項目を開く",
+                   command=lambda: sel() and sel().other and self.open_in_dict(sel().other)).pack(side="left", padx=6)
+        ttk.Button(bf, text="調べ直す", command=lambda: (w.destroy(), self.check_conflicts())).pack(side="left")
+        ttk.Button(bf, text="閉じる", command=w.destroy).pack(side="right")
+        parts = [(f"競合チェック：", None), (f"効かない {n['error']}", "crit" if n["error"] else None), (" ／ ", None),
+                 (f"無駄・要確認 {n['warn']}", "warn" if n["warn"] else None), (f" ／ お知らせ {n['info']}", None)]
+        self._refresh_status(parts)
 
     def _sort_dict(self, col):
         self._sort_key = col
@@ -2026,6 +2448,14 @@ class App:
 
     def restore_dict(self):
         files = core.list_backups(BACKUP_DIR)
+        kept = core.list_kept(BACKUP_DIR)
+        labels = []
+        for p in files:
+            m = re.search(r"(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})(\d{2})", os.path.basename(p))
+            labels.append(f"{m[1]}/{m[2]}/{m[3]} {m[4]}:{m[5]}:{m[6]}" if m else os.path.basename(p))
+        for p, text in kept:
+            files.append(p)
+            labels.append(f"［保管］{text}")
         if not files:
             messagebox.showinfo(APP_NAME, "バックアップはまだありません。\n\n"
                                 "辞書のバックアップは、起動したときと、削除・取り込み・戻すの前に、"
@@ -2034,7 +2464,8 @@ class App:
         w = tk.Toplevel(self.root)
         w.title("辞書をバックアップから戻す")
         w.transient(self.root)
-        ttk.Label(w, text="戻したい時点を選んでください（新しい順）。今の辞書も、戻す前にバックアップに残します。",
+        ttk.Label(w, text="戻したい時点を選んでください（新しい順）。今の辞書も、戻す前にバックアップに残します。\n"
+                          "［保管］は、新しい版を初めて起動する前・各月の最初の状態です。古い順に消えずに残ります。",
                   padding=(10, 8)).pack(anchor="w")
         lb = tk.Listbox(w, height=10, width=64, font=self.fonts["ui"], activestyle="none", exportselection=False)
         lb.pack(fill="both", expand=True, padx=10)
@@ -2044,9 +2475,7 @@ class App:
         for tg, col in (("add", "#2a7a2a"), ("del", MSG_STYLE["crit"]["fg"]), ("chg", MSG_STYLE["warn"]["fg"])):
             det.tag_configure(tg, foreground=col)
         diffs = []
-        for p in files:
-            m = re.search(r"(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})(\d{2})", os.path.basename(p))
-            when = f"{m[1]}/{m[2]}/{m[3]} {m[4]}:{m[5]}:{m[6]}" if m else os.path.basename(p)
+        for p, when in zip(files, labels):
             try:
                 d = core.Dictionary.load(p)
                 diff = core.dict_diff(self.dic, d)
@@ -2091,7 +2520,7 @@ class App:
             except Exception as ex:
                 messagebox.showerror(APP_NAME, f"このバックアップは読めませんでした。\n{ex}", parent=w)
                 return
-            if not messagebox.askyesno(APP_NAME, f"辞書を {lb.get(sel[0]).split()[0]} {lb.get(sel[0]).split()[1]} の状態"
+            if not messagebox.askyesno(APP_NAME, f"辞書を「{labels[sel[0]]}」の状態"
                                                  f"（{len(d.entries)} 件）に戻しますか？\n今の辞書は、バックアップに残します。", parent=w):
                 return
             self.save_dict()
@@ -2153,7 +2582,9 @@ class App:
         tab = ttk.Frame(nb, padding=10)
         nb.add(tab, text="　設定　")
         self.settings_tab = tab
-        ttk.Label(tab, text="試聴（AquesTalkPlayer）", font=self.fonts["title"]).pack(anchor="w")
+        hd = ttk.Frame(tab)
+        hd.pack(anchor="w")
+        ttk.Label(hd, text="試聴（AquesTalkPlayer）", font=self.fonts["title"]).pack(side="left")
         row = ttk.Frame(tab)
         row.pack(fill="x", pady=6)
         ttk.Label(row, text="AquesTalkPlayer.exe の場所:").pack(side="left")
@@ -2176,13 +2607,18 @@ class App:
                 "自分用のプリセット（例：まりさ抑揚）を作り、その名前を変換タブの「声（プリセット）」に入れてください。")
         if not IS_WINDOWS:
             note += "\n\n※ AquesTalkPlayerは Windows 用のソフトなので、この環境では試聴できません。"
-        nl = ttk.Label(tab, text=note, foreground="#444", justify="left")
-        nl.pack(anchor="w", fill="x", pady=(4, 0))
-        tab.bind("<Configure>", lambda e: nl.configure(wraplength=max(e.width - 30, 300)), add="+")
+        self._help(hd, "試聴（AquesTalkPlayer）について", note).pack(side="left", padx=8)
+        ttk.Label(tab, text="変換タブの［▶ 試聴］に使います。「まりさ」「れいむ」のままだと棒読みになります（タイトル横の ? の印で直し方）",
+                  foreground="#444").pack(anchor="w", pady=(4, 0))
 
         # 文字の大きさ
         ttk.Separator(tab).pack(fill="x", pady=10)
-        ttk.Label(tab, text="文字の大きさ", font=self.fonts["title"]).pack(anchor="w")
+        hd = ttk.Frame(tab)
+        hd.pack(anchor="w")
+        ttk.Label(hd, text="文字の大きさ", font=self.fonts["title"]).pack(side="left")
+        self._help(hd, "文字の大きさ", f"{round(SCALE_MIN * 100)}%〜{round(SCALE_MAX * 100)}% の間で、10% ずつ変えられます。\n"
+                   "Ctrl＋マウスホイールや、Ctrl＋＋／Ctrl＋－（100%に戻すのは Ctrl＋0）でも変えられます。\n"
+                   "ウィンドウも同じ割合で大きくなります。").pack(side="left", padx=8)
         fr = ttk.Frame(tab)
         fr.pack(fill="x", pady=4)
         self.scale_var = tk.IntVar(value=round(self.scale * 100))
@@ -2195,23 +2631,33 @@ class App:
         ttk.Label(fr, text="%").pack(side="left", padx=(2, 12))
         for label, v in (("小 90%", 0.9), ("標準 100%", 1.0), ("大 130%", 1.3), ("特大 160%", 1.6)):
             ttk.Button(fr, text=label, command=lambda v=v: self.set_scale(v)).pack(side="left", padx=2)
-        ttk.Label(tab, text=f"{round(SCALE_MIN * 100)}%〜{round(SCALE_MAX * 100)}% の間で、10% ずつ変えられます。"
-                            "Ctrl＋マウスホイールや、下のショートカットでも変えられます。ウィンドウも同じ割合で大きくなります。",
-                  foreground="#444").pack(anchor="w")
 
-        ttk.Checkbutton(tab, text="起動時に、置き場所（OneDrive などの同期フォルダ・Program Files）を確かめて知らせる"
-                                  "（ZIP の中から開いたときと、書き込めないときは、常に知らせます）",
-                        variable=self.check_place, command=self._save_conf).pack(anchor="w", pady=(8, 0))
-        ttk.Checkbutton(tab, text="変換結果で、未確認の文節と、手で直した文節に色を付ける",
+        r1 = ttk.Frame(tab)
+        r1.pack(anchor="w", pady=(8, 0))
+        ttk.Checkbutton(r1, text="起動時に、置き場所を確かめて知らせる",
+                        variable=self.check_place, command=self._save_conf).pack(side="left")
+        self._help(r1, "置き場所の確認", "起動したときに、このツールが置かれている場所を確かめて、困ることがあれば知らせます。\n\n"
+                   "・OneDrive などの同期フォルダ：辞書の保存が同期とぶつかって、食い違うことがあります\n"
+                   "・Program Files：書き込めず、辞書や設定が保存されないことがあります\n\n"
+                   "ZIP の中から開いたときと、書き込めない場所のときは、このチェックを外していても必ず知らせます"
+                   "（辞書が消えたり、保存されなかったりするため）。").pack(side="left", padx=8)
+        r2 = ttk.Frame(tab)
+        r2.pack(anchor="w", pady=(4, 0))
+        ttk.Checkbutton(r2, text="変換結果で、未確認の文節と、手で直した文節に色を付ける",
                         variable=self.phrase_colors,
-                        command=lambda: (self._save_conf(), self._update_insight())).pack(anchor="w", pady=(4, 0))
+                        command=lambda: (self._save_conf(), self._update_insight())).pack(side="left")
+        self._help(r2, "文節の色分け", PHRASE_COLOR_HELP).pack(side="left", padx=8)
 
         # ショートカット
         ttk.Separator(tab).pack(fill="x", pady=10)
-        ttk.Label(tab, text="ショートカットキー", font=self.fonts["title"]).pack(anchor="w")
-        ttk.Label(tab, text="行をダブルクリックするか［変更…］を押してから、割り当てたいキーを押してください"
-                            "（Ctrl・Alt・Shift との組み合わせ、または F1〜F12）。",
-                  foreground="#444").pack(anchor="w")
+        hd = ttk.Frame(tab)
+        hd.pack(anchor="w")
+        ttk.Label(hd, text="ショートカットキー", font=self.fonts["title"]).pack(side="left")
+        self._help(hd, "ショートカットキー", "行をダブルクリックするか［変更…］を押してから、割り当てたいキーを押してください。\n"
+                   "Ctrl・Alt・Shift との組み合わせ、または F1〜F12 が使えます。\n"
+                   "ほかの操作に使われているキーを押すと、付け替えてよいか聞きます。［外す］でキーを外し、［すべて最初に戻す］で最初の状態に戻ります。"
+                   ).pack(side="left", padx=8)
+        ttk.Label(tab, text="行をダブルクリックして、割り当てたいキーを押します", foreground="#444").pack(anchor="w")
         kf = ttk.Frame(tab)
         kf.pack(fill="both", expand=True, pady=4)
         tv = ttk.Treeview(kf, columns=("name", "key"), show="headings", height=7, selectmode="browse")
