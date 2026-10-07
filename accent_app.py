@@ -1093,6 +1093,7 @@ class App:
         add_restore("この文節を変換直後に戻す", self._out_converted, "変換直後の形に戻しました")
         add_restore("この文節を辞書適用前に戻す", self._out_prepared, "辞書を当てる前の形に戻しました")
         m.add_separator()
+        m.add_command(label="アクセントを聞き比べる…", command=lambda: self.compare_accents(ph))
         m.add_command(label="この文節を辞書に登録…", command=lambda: self._register_phrase(ph))
         m.add_command(label="この文節を学習候補に送る", command=lambda: self._learn_phrase(ph))
         try:
@@ -1585,13 +1586,18 @@ class App:
         except OSError as ex:
             messagebox.showerror(APP_NAME, f"AquesTalkPlayer を起動できませんでした。\n{exe}\n{ex}")
 
-    def preview(self):
+    def preview(self, text=None, note=None):
+        """試聴する。text を渡すとそれを読む（聞き比べ用）。渡さなければ変換結果の選択範囲か全体"""
         if not IS_WINDOWS:
             return
         exe = self._player_exe()
         if not exe:
             return
-        text = self._preview_text()
+        if text is None:
+            text = self._preview_text()
+        else:
+            text = core._join_lines(text)
+            self._preview_note = note or ""
         if not text:
             messagebox.showinfo(APP_NAME, "読み上げる所がありません。\n"
                                 "変換結果の欄に、仮名の読みが入っていません。①に YMM4 の読みを貼って変換してから押してください。")
@@ -1944,6 +1950,7 @@ class App:
         ttk.Button(bot, text="編集", command=self.edit_entry).pack(side="left", padx=4)
         ttk.Button(bot, text="削除", command=self.delete_entries).pack(side="left")
         ttk.Button(bot, text="競合を調べる…", command=self.check_conflicts).pack(side="left", padx=(16, 0))
+        ttk.Button(bot, text="統計…", command=self.show_stats).pack(side="left", padx=6)
         ttk.Button(bot, text="別名で書き出す…", command=self.export_dict).pack(side="right")
         ttk.Button(bot, text="バックアップから戻す…", command=self.restore_dict).pack(side="right", padx=(6, 0))
         ttk.Button(bot, text="他の辞書を取り込む…", command=self.import_dict).pack(side="right", padx=6)
@@ -2076,6 +2083,110 @@ class App:
         r = self._script_data[sel[0]]
         self._copy(core.normalize(r.text))
         self._refresh_status(f"{r.no}行目をコピーしました。YMM4 のその台詞に貼り付けてください")
+
+    # ── アクセントの聞き比べ ──────────────────────
+    def compare_accents(self, ph):
+        """文節のアクセントの形を全部並べ、選ぶとすぐ聞ける。上下キーで2つを行き来すれば A/B 比較になる"""
+        t = self.out_text
+        s = t.get("1.0", "end-1c")
+        word = s[ph.start:ph.end]
+        vs = core.accent_variants(s, ph)
+        if len(vs) < 2:
+            self._refresh_status("この文節には、アクセントを付けられる文字がありません")
+            return
+        w = tk.Toplevel(self.root)
+        w.title(f"アクセントを聞き比べる：{self._short(word, 20)}")
+        w.transient(self.root)
+        ttk.Label(w, text="行を選ぶと、その形ですぐ読み上げます。↑↓キーで2つの行を行き来すると、聞き比べ（A/B）になります",
+                  padding=(10, 8, 10, 2), wraplength=self._sc(560)).pack(anchor="w")
+        scope = tk.StringVar(value="line")
+        rf = ttk.Frame(w, padding=(10, 0))
+        rf.pack(anchor="w")
+        ttk.Label(rf, text="読む範囲:").pack(side="left")
+        ttk.Radiobutton(rf, text="その行（前後の流れごと）", value="line", variable=scope).pack(side="left", padx=4)
+        ttk.Radiobutton(rf, text="文節だけ", value="phrase", variable=scope).pack(side="left")
+        tv = ttk.Treeview(w, columns=("form", "kind"), show="headings", height=min(10, len(vs)), selectmode="browse")
+        tv.heading("form", text="形")
+        tv.heading("kind", text="")
+        tv.column("form", width=self._sc(240))
+        tv.column("kind", width=self._sc(320))
+        tv.tag_configure("cur", foreground="#1f5fbf")
+        for i, v in enumerate(vs):
+            kind = "平板" if v.k is None else f"{''.join(u.text.lstrip('_') for u in ph.units[:v.k + 1])} の後ろで下がる"
+            tv.insert("", "end", iid=f"v{i}", values=(v.text, kind + ("（いまの形）" if v.current else "")),
+                      tags=("cur",) if v.current else ())
+        tv.pack(fill="both", expand=True, padx=10, pady=6)
+        if not IS_WINDOWS:
+            ttk.Label(w, text="試聴は Windows 専用です（AquesTalkPlayer が Windows 用のため）", foreground="#666",
+                      padding=(10, 0)).pack(anchor="w")
+
+        def chosen():
+            sel = tv.selection()
+            return vs[int(sel[0][1:])] if sel else None
+
+        def play(_e=None):
+            v = chosen()
+            if not v:
+                return
+            if scope.get() == "phrase":
+                text = v.text
+            else:
+                a, b = core.line_at(v.whole, ph.start)
+                text = v.whole[a:b]
+            self.preview(text, note=f"（聞き比べ：{v.text}）")
+
+        def adopt():
+            v = chosen()
+            if not v:
+                return
+            if t.get("1.0", "end-1c") != s:
+                messagebox.showinfo(APP_NAME, "聞き比べを開いた後に変換結果が書き換わったので、採用できません。もう一度開いてください。",
+                                    parent=w)
+                return
+            self._set_accent(ph, v.k)
+            w.destroy()
+        tv.bind("<<TreeviewSelect>>", play)
+        bf = ttk.Frame(w, padding=10)
+        bf.pack(fill="x")
+        ttk.Button(bf, text="▶ もう一度聞く", command=play).pack(side="left")
+        ttk.Button(bf, text="この形を採用", style="Big.TButton", command=adopt).pack(side="left", padx=6)
+        ttk.Button(bf, text="閉じる", command=lambda: (self.stop_preview(), w.destroy())).pack(side="right")
+        tv.focus_set()
+
+    # ── 辞書の統計 ─────────────────────────────────
+    def show_stats(self):
+        st = core.dict_stats(self.dic)
+        w = tk.Toplevel(self.root)
+        w.title("辞書の統計")
+        w.transient(self.root)
+        lines = [f"登録数：{st['total']}項目（今月追加 {st['this_month']}）",
+                 f"使用回数の合計：{st['hits_total']}（1つの台詞で当たった項目を1回と数えます）",
+                 f"文脈付き：{st['context']}　句頭のみ：{st['head']}　誤爆しやすい：{st['risky']}",
+                 f"一度も使われていない：{len(st['unused'])}項目"]
+        ttk.Label(w, text="\n".join(lines), padding=(10, 8)).pack(anchor="w")
+        nb = ttk.Notebook(w)
+        nb.pack(fill="both", expand=True, padx=10)
+        tvs = {}
+        for key, title in (("top", "よく使われた項目"), ("unused", "一度も使われていない項目")):
+            fr = ttk.Frame(nb)
+            nb.add(fr, text=title)
+            tv = ttk.Treeview(fr, columns=("n", "e"), show="headings", height=10, selectmode="browse")
+            tv.heading("n", text="使用回数")
+            tv.heading("e", text="項目")
+            tv.column("n", width=self._sc(80), anchor="center", stretch=False)
+            tv.column("e", width=self._sc(460))
+            sb = ttk.Scrollbar(fr, command=tv.yview)
+            tv.configure(yscrollcommand=sb.set)
+            tv.pack(side="left", fill="both", expand=True)
+            sb.pack(side="right", fill="y")
+            for i, e in enumerate(st[key]):
+                tv.insert("", "end", iid=f"e{i}", values=(e.hits, self._entry_label(e)))
+            tv.bind("<Double-1>", lambda ev, tv=tv, key=key: tv.selection() and
+                    self.open_in_dict(st[key][int(tv.selection()[0][1:])]))
+            tvs[key] = tv
+        ttk.Label(w, text="ダブルクリックで辞書タブのその行を開きます。取り込んだ辞書の項目は、取り込んでからの回数です",
+                  foreground="#666", padding=(10, 4)).pack(anchor="w")
+        ttk.Button(w, text="閉じる", command=w.destroy).pack(anchor="e", padx=10, pady=(0, 10))
 
     def check_conflicts(self):
         """辞書の競合チェック（辞書の DRC）。項目ごとに、その項目が当たるはずの最小の文を本物の辞書で変換して確かめる"""

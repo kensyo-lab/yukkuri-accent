@@ -95,4 +95,29 @@ s0 = text5.index("とおった")
 inf6 = phrase_statuses(text5, text5, ap5, [(s0, s0 + 4)])
 check("確認済みにすると、その行は済み", line_reports(text5, inf6, ap5, validate(text5))[0].todo, False)
 
+# ── アクセントの聞き比べ ──
+import datetime as _dt
+from accent_core import accent_variants, split_phrases, Phrase, line_at, dict_stats
+s7 = "これわ/たんさ'き/です\nつぎ"
+ph7 = [p for p in split_phrases(s7) if isinstance(p, Phrase) and s7[p.start:p.end] == "たんさ'き"][0]
+v = accent_variants(s7, ph7)
+check("候補：平板・各拍（ん は拍だがアクセント不可）", [x.text for x in v], ["たんさき", "た'んさき", "たんさ'き", "たんさき'"])
+check("いまの形に印", [x.current for x in v], [False, False, True, False])
+check("全体も差し替わる", v[1].whole, "これわ/た'んさき/です\nつぎ")
+check("行の範囲", line_at(s7, 5), (0, 12))
+ph8 = [p for p in split_phrases("とおった") if isinstance(p, Phrase)][0]
+check("平板の文節は平板がいまの形", [x.current for x in accent_variants("とおった", ph8)][0], True)
+
+# ── 辞書の統計 ──
+d9 = Dictionary()
+d9.upsert("たんさき", "たんさ'き"); d9.upsert("わ", "わ'"); d9.upsert("はし", "はし'", after="をわたる")
+d9.upsert("ぜひ", "ぜ'ひ", True)
+d9.entries[0].hits, d9.entries[1].hits = 5, 2
+d9.entries[0].added, d9.entries[1].added, d9.entries[2].added, d9.entries[3].added = "2026-10-01", "2026-09-30", "2026-10-05", ""
+st = dict_stats(d9, _dt.date(2026, 10, 7))
+check("統計", {k: v for k, v in st.items() if k not in ("top", "unused")},
+      {"total": 4, "this_month": 2, "hits_total": 7, "context": 1, "head": 1, "risky": 1})
+check("よく使われた順", [e.src for e in st["top"]], ["たんさき", "わ"])
+check("一度も使われていない", [e.src for e in st["unused"]], ["ぜひ", "はし"])
+
 print(f"{n} 件 OK")

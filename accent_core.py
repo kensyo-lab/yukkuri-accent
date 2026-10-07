@@ -1882,3 +1882,65 @@ def script_summary(rows: list[LineReport]) -> dict:
         "risky": sum(r.risky for r in rows),
         "done_lines": sum(not r.todo for r in rows),
     }
+
+
+# ─────────────────────────────────────────────
+# アクセントの聞き比べ（A/B 試聴）
+# ─────────────────────────────────────────────
+@dataclass
+class AccentVariant:
+    k: int | None        # ' を置く拍（None は平板）
+    text: str            # その形にした文節
+    whole: str           # その形にした変換結果全体
+    current: bool        # いまの形か
+
+
+def with_accent(s: str, ph: Phrase, k: int | None) -> str:
+    """文節 ph のアクセントを k 拍目の後ろだけにした s（k が None なら平板）"""
+    dels, ins = set_accent_edits(ph, k)
+    if not dels and ins is None:
+        return s
+    chars = list(s)
+    if ins is not None:
+        chars.insert(ins, ACCENT)
+    for d in sorted(dels, reverse=True):
+        chars.pop(d if ins is None or d < ins else d + 1)
+    return "".join(chars)
+
+
+def accent_variants(s: str, ph: Phrase) -> list[AccentVariant]:
+    """文節 ph に付けられるアクセントの形を全部並べる（平板 → 1拍目 → 2拍目 …）"""
+    cur_k = ph.accents[0] if len(ph.accents) == 1 and len(ph.marks) == 1 else (None if not ph.marks else -1)
+    out = []
+    for k in [None] + [i for i, u in enumerate(ph.units) if u.can_accent]:
+        whole = with_accent(s, ph, k)
+        d = len(whole) - len(s)
+        out.append(AccentVariant(k, whole[ph.start:ph.end + d], whole, k == cur_k))
+    return out
+
+
+def line_at(s: str, pos: int) -> tuple[int, int]:
+    """pos を含む行の範囲"""
+    a = s.rfind("\n", 0, pos) + 1
+    b = s.find("\n", pos)
+    return a, (len(s) if b < 0 else b)
+
+
+# ─────────────────────────────────────────────
+# 辞書の統計
+# ─────────────────────────────────────────────
+def dict_stats(dic: "Dictionary", today: _dt.date | None = None, top: int = 10) -> dict:
+    today = today or _dt.date.today()
+    month = today.strftime("%Y-%m")
+    es = dic.entries
+    used = sorted((e for e in es if e.hits), key=lambda e: (-e.hits, e.key))
+    return {
+        "total": len(es),
+        "this_month": sum(1 for e in es if e.added.startswith(month)),
+        "hits_total": sum(e.hits for e in es),
+        "top": used[:top],
+        "unused": sorted((e for e in es if not e.hits), key=lambda e: e.key),
+        "context": sum(1 for e in es if e.before or e.after),
+        "head": sum(1 for e in es if e.head_only),
+        "risky": sum(1 for e in es if entry_warnings(e)),
+    }
