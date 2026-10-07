@@ -560,6 +560,8 @@ class Entry:
     hits: int = 0
     before: str = ""         # 文脈の条件: 直前がこれで終わるときだけ当てる（空なら条件なし）
     after: str = ""          # 文脈の条件: 直後がこれで始まるときだけ当てる（空なら条件なし）
+    # この版が知らない項目（新しい版で増えた情報など）。読み込んだまま保存し直して、消さないようにする
+    extra: dict = field(default_factory=dict, compare=False, repr=False)
 
     @property
     def key(self) -> tuple[str, str, str]:
@@ -580,13 +582,18 @@ class Entry:
             d["added"] = self.added
         if self.hits:
             d["hits"] = self.hits
+        for k, v in self.extra.items():
+            d.setdefault(k, v)
         return d
+
+    KNOWN = {"from", "to", "before", "after", "head_only", "note", "added", "hits"}
 
     @staticmethod
     def from_json(d):
         return Entry(normalize(d["from"]), normalize(d["to"]), bool(d.get("head_only")),
                      d.get("note", ""), d.get("added", ""), int(d.get("hits", 0)),
-                     normalize(d.get("before", "")), normalize(d.get("after", "")))
+                     normalize(d.get("before", "")), normalize(d.get("after", "")),
+                     {k: v for k, v in d.items() if k not in Entry.KNOWN})
 
 
 @dataclass
@@ -636,11 +643,19 @@ def entry_priority(e: "Entry"):
 
 class Dictionary:
     FORMAT = "yukkuri-accent-dict"
+    VERSION = 2          # この版が分かる辞書の形式の版（1: 条件なし 2: 前後の条件つき）
 
     def __init__(self, name: str = "マイ辞書"):
         self.name = name
         self.entries: list[Entry] = []
         self._index: dict[str, list[Entry]] | None = None
+        self.file_version = 0        # 読み込んだファイルの形式の版
+        self.extra: dict = {}        # この版が知らない、ファイル全体の情報（そのまま保存し直す）
+
+    @property
+    def newer_format(self) -> bool:
+        """この版より新しい版で作られた辞書か（知らない情報は消さずに残すが、念のため知らせる）"""
+        return self.file_version > self.VERSION
 
     # 入出力 ---------------------------------------------------------
     @classmethod
@@ -651,11 +666,16 @@ class Dictionary:
                 data = json.load(f)
             d.name = data.get("name", d.name)
             d.entries = [Entry.from_json(e) for e in data.get("entries", [])]
+            d.file_version = int(data.get("version", 1) or 1)
+            d.extra = {k: v for k, v in data.items() if k not in ("format", "version", "name", "entries")}
         return d
 
     def save(self, path: str):
-        data = {"format": self.FORMAT, "version": 2 if any(e.before or e.after for e in self.entries) else 1,
+        ver = 2 if any(e.before or e.after for e in self.entries) else 1
+        data = {"format": self.FORMAT, "version": max(ver, self.file_version),   # 新しい形式の版は下げない
                 "name": self.name, "entries": [e.to_json() for e in sorted(self.entries, key=lambda e: e.key)]}
+        for k, v in self.extra.items():
+            data.setdefault(k, v)
         tmp = path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=1)
@@ -1338,6 +1358,48 @@ def backup_file(path: str, folder: str, keep: int = 20, now: _dt.datetime | None
         except OSError:
             pass
     return dst
+
+
+KEEP_DIR = "keep"      # バックアップのうち、古い順に消さずに残し続けるもの（版を上げる前・月の最初）
+
+
+def keep_backup(path: str, folder: str, label: str) -> str | None:
+    """path を folder/keep/ に「label」の名前で写す。すでにあれば写さない（最初の1回だけを残す）。
+    ふつうのバックアップ（新しい20個）は古い順に消えるので、節目の状態はこちらに残す。"""
+    dst = os.path.join(folder, KEEP_DIR, f"{BACKUP_PREFIX}keep_{label}.json")
+    if os.path.exists(dst) or not os.path.exists(path):
+        return None
+    os.makedirs(os.path.dirname(dst), exist_ok=True)
+    with open(path, "rb") as f:
+        data = f.read()
+    with open(dst, "wb") as f:
+        f.write(data)
+    return dst
+
+
+def list_kept(folder: str) -> list[tuple[str, str]]:
+    """残し続けているバックアップ [(場所, 説明)]（新しい順）"""
+    d = os.path.join(folder, KEEP_DIR)
+    try:
+        names = [n for n in os.listdir(d) if n.startswith(BACKUP_PREFIX + "keep_") and n.endswith(".json")]
+    except OSError:
+        return []
+    out = []
+    for n in names:
+        label = n[len(BACKUP_PREFIX + "keep_"):-5]
+        if label.startswith("before-v"):
+            text = f"{label[7:]} を初めて起動する前"
+        elif label.startswith("month-"):
+            y, m = label[6:].split("-")[:2]
+            text = f"{y}年{int(m)}月の最初"
+        elif label.startswith("newer-"):
+            text = "新しい版の辞書を、この版で初めて開く前"
+        else:
+            text = label
+        p = os.path.join(d, n)
+        out.append((p, text))
+    out.sort(key=lambda x: os.path.getmtime(x[0]), reverse=True)
+    return out
 
 
 def list_backups(folder: str) -> list[str]:
