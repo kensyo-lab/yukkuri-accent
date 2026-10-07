@@ -2,11 +2,16 @@
 
 [![最新版](https://img.shields.io/github/v/release/kensyo-lab/yukkuri-accent?label=%E6%9C%80%E6%96%B0%E7%89%88)](https://github.com/kensyo-lab/yukkuri-accent/releases/latest)
 
-YMM4が出力するAquesTalk（ゆっくりボイス）の読み記号列を、**作者さん自身の辞書**で自動補正するツールです。
-直し方はプログラムには書き込まず、辞書（`accent_dict.json`）と数字の読み表（`numbers.json`）に置いています。使うほど、その人のクセを覚えていきます。
+YMM4 が出す AquesTalk（ゆっくりボイス）の読み記号列を、**作者さん自身の辞書**で自動補正するツールです。使うほど、その人のクセを覚えていきます。
 
-v0.3 からは、AquesTalk の開発元・株式会社アクエストの公式アプリ **AquesTalkPlayer** を使って、直した読みを**その場で試聴**できるようになりました（Windowsのみ・AquesTalkPlayer は各自で入手。詳しくは「[4. 試聴](#4-試聴windowsのみ)」）。
-YMM4に貼る前に耳で確かめられるので、「直す → 聞く → また直す」がこのツールの中だけで回せます。
+## まず使うだけなら（3ステップ）
+1. **入れる**：[最新のリリース](https://github.com/kensyo-lab/yukkuri-accent/releases/latest)の Assets から `yukkuri-accent-vX.X.X-windows.zip` をダウンロードして展開し、`yukkuri-accent.exe` を開きます（止められたときは「[ダウンロードと起動](#ダウンロードと起動)」）
+2. **直す**：YMM4 でセリフの読みをコピーして、このツールの画面に戻ります。自動で辞書を当てて直し、結果をクリップボードに入れます
+3. **戻す**：YMM4 に戻って貼り付けます
+
+直したアクセントを辞書に入れておくと、次から同じ所は自動で直ります。試聴（AquesTalkPlayer）・台本のまとめチェック・辞書の競合チェックなどは、下の「[詳しい使い方](#詳しい使い方)」にあります。
+
+---
 
 **このツールの考え方**：YMM4 の読みを全部自動で正解にすることは目指しません。**人が確かめるべき所だけを、いちばん早く見つけられるようにする**ことを目指しています。辞書で直せる所は辞書で直し、残りは「未確認」「誤爆注意」として目に見えるようにして、耳で確かめる時間を、確かめるべき所だけに使えるようにします。
 
@@ -46,7 +51,7 @@ Python 3.8以降（tkinter付き）が入っていれば、追加のインスト
 python accent_app.py
 ```
 
-## 使い方
+## 詳しい使い方
 
 ### 1. 変換タブ
 1. YMM4で台詞の読み（初期状態）をコピーします
@@ -262,14 +267,20 @@ YMM4側のクセもいくつか後始末します。
 | `tools/make_icon.py` | アイコンPNGから .ico を作る道具（ビルド時に自動で使われます） |
 | `tools/make_changelog.py` | リリースノートをまとめて CHANGELOG.md を作る道具（ビルド時に自動で使われます） |
 | `.github/workflows/release.yml` | `v` で始まるタグを付けると、Windows版を自動で作って Releases に置く設定 |
-| `tests/` | ビフォー／アフターの例と確認用スクリプト |
+| `tests/` | ビフォー／アフターの例と確認用スクリプト（`python tests/run_all.py` で全部動かせます） |
 
 ## 新しい版の出し方（開発者向け）
-1. `accent_app.py` の `VERSION` を上げる（例: `"0.3"`）
-2. `release-notes/v0.3.md` にリリースノートを書く
+1. `accent_app.py` の `VERSION` を上げる（例: `"0.9.2"`）
+2. `release-notes/v0.9.2.md` にリリースノートを書く（版の番号と同じ名前）
 3. main に送る
 
-GitHub Actions が Windows 版を作り、`v0.3` のタグと Release を自動で作ります。
+GitHub Actions がテストを動かし、Windows 版を作って、`v0.9.2` のタグと Release を自動で作ります。
+
+**テストの動かし方**：`tests/` のテストは unittest / pytest の形ではなく、assert を並べて、そのまま実行する形です（`python -m unittest` や `pytest` では「0件」と出ます）。
+```
+python tests/run_all.py              # 全部まとめて（どれか失敗すると終了コード 1）
+python tests/test_dict_safety.py     # 1つずつ
+```
 
 ## 記号の仕様
 [AquesTalk 音声記号列仕様書](https://www.a-quest.com/archive/manual/siyo_onseikigou.pdf)に従って検査しています。
