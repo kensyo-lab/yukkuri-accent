@@ -27,11 +27,19 @@ YMM4に貼る前に耳で確かめられるので、「直す → 聞く → ま
 > 個人が作った署名のないソフトなので、初回に表示されることがあります。「詳細情報」→「実行」で起動できます。
 > まれに、ウイルス対策ソフトが誤って検知することもあります（PyInstallerで作ったソフトでよく起きる現象です）。
 > 気になる場合は、下の「Pythonで動かす方法」を使ってください。中身はすべてこのリポジトリで公開しています。
+>
+> **「スマート アプリ コントロールが…ブロックしました」と出たら**（Windows 11）
+> 署名のない exe を止める保護機能で、「実行」のボタンがありません。**下の「Pythonで動かす方法」を使ってください**（署名付きの Python で動かすので止められません。機能は同じです）。詳しくは [FAQ](FAQ.md) を見てください。
 
 ### Pythonで動かす方法
 > **Python で動かす場合は、Windows 版の zip ではなく、GitHub の「Source code (zip)」またはリポジトリ本体を取得してください。**（Windows 版の zip には .exe しか入っていません）
 
 Python 3.8以降（tkinter付き）が入っていれば、追加のインストールは要りません。
+
+1. [python.org](https://www.python.org/downloads/) から Python を入れます（途中の「tcl/tk and IDLE」はチェックが入ったまま。tkinter のためです）
+2. [最新のリリース](https://github.com/kensyo-lab/yukkuri-accent/releases/latest)の Assets にある「**Source code (zip)**」をダウンロードして、好きな場所に展開します
+3. exe 版から乗り換えるときは、`accent_dict.json`・`numbers.json`・`settings.json`・`backup` フォルダを、展開したフォルダへコピーします（形式は同じなので、そのまま使えます）
+4. `yukkuri-accent.pyw` をダブルクリックします
 `yukkuri-accent.pyw` をダブルクリックすると、コンソール画面を出さずに起動します。コマンドで起動する場合は次のとおりです。
 
 ```
