@@ -715,7 +715,9 @@ class Dictionary:
             v.sort(key=entry_priority)
         self._index = idx
 
-    def apply(self, s: str) -> tuple[str, list[Applied]]:
+    def apply(self, s: str, skip: "Entry | None" = None) -> tuple[str, list[Applied]]:
+        """辞書を当てる。skip の項目は無いものとして扱う（競合チェックで「これが無かったら」を試すため）。
+        使用回数はここでは数えない（count_usage で、同じ台詞を何度変換しても1回と数える）"""
         if self._index is None:
             self._build_index()
         out, applied = [], []
@@ -724,7 +726,7 @@ class Dictionary:
         while i < len(s):
             hit = None
             for e in self._index.get(s[i], ()):
-                if s.startswith(e.src, i):
+                if e is not skip and s.startswith(e.src, i):
                     if e.head_only and i > 0 and s[i - 1] not in BOUNDARY:
                         continue
                     if (e.before or e.after) and not ctx_match(e, s, i, i + len(e.src)):
@@ -735,7 +737,6 @@ class Dictionary:
                 out.append(hit.dst)
                 applied.append(Applied(olen, olen + len(hit.dst), hit))
                 olen += len(hit.dst)
-                hit.hits += 1
                 i += len(hit.src)
             else:
                 out.append(s[i])
@@ -1688,3 +1689,139 @@ def usage_summary(used: list[UsedEntry]) -> dict:
         "head": sum(1 for u in used if u.entry.head_only),
         "risky": sum(1 for u in used if u.risky),
     }
+
+
+# ─────────────────────────────────────────────
+# 使用回数（同じ台詞は、何度変換しても1回と数える）
+# ─────────────────────────────────────────────
+def line_key(line: str) -> str:
+    """台詞1行を表す短い印。設定ファイルに「もう数えた台詞」として残すので、本文ではなくハッシュにする"""
+    import hashlib
+    return hashlib.sha1(normalize(line).strip().encode("utf-8")).hexdigest()[:16]
+
+
+def count_usage(text: str, applied: list[Applied], seen: set[str]) -> int:
+    """変換結果 text の行ごとに、まだ数えていない台詞なら、その行で当たった項目の使用回数を1ずつ増やす。
+    同じ行で同じ項目が2回当たっても1回。数えた行の印は seen に足す。戻り値: 増やした回数の合計"""
+    lines = text.split("\n")
+    starts, pos = [], 0
+    for ln in lines:
+        starts.append(pos)
+        pos += len(ln) + 1
+    by_line: dict[int, list[Entry]] = {}
+    for a in applied:
+        k = max(i for i, st in enumerate(starts) if st <= a.start)
+        got = by_line.setdefault(k, [])
+        if all(a.entry is not e for e in got):
+            got.append(a.entry)
+    n = 0
+    for k, entries in by_line.items():
+        key = line_key(lines[k])
+        if key in seen:
+            continue
+        seen.add(key)
+        for e in entries:
+            e.hits += 1
+            n += 1
+    return n
+
+
+# ─────────────────────────────────────────────
+# 辞書の競合チェック（辞書の DRC）
+# ─────────────────────────────────────────────
+# 考え方: 項目ごとに「その項目が当たるはずの、いちばん短い文」を作り、本物の辞書で変換してみる。
+# 優先順位の規則を書き直して判定するのではなく、変換そのものを使うので、判定と本番がずれない。
+PROBE_MARK = "〓"    # 試しの文の頭に置く、どの項目にも当たらない文字（句頭のみの項目が文頭で当たらないように）
+
+CONFLICT_LEVEL = {"error": "効かない", "warn": "無駄・要確認", "info": "お知らせ"}
+
+
+@dataclass
+class Conflict:
+    level: str                 # "error" / "warn" / "info"
+    kind: str                  # 短い種類名（一覧の列）
+    entry: Entry               # 問題のある項目
+    msg: str                   # 説明（どうすればよいかまで）
+    other: Entry | None = None # 原因になっている別の項目
+
+
+def _probe(e: Entry) -> tuple[str, int]:
+    """e が当たるはずの最小の文と、その中で e が始まる位置"""
+    before, after = normalize(e.before), normalize(e.after)
+    head = PROBE_MARK + before + ("/" if e.head_only else "")   # 句頭のみの項目は、区切りの直後に置く
+    return head + e.src + after, len(head)
+
+
+def _label(e: Entry) -> str:
+    ctx = ctx_label(e.before, e.after)
+    return f"{e.src} → {e.dst}" + (f"（{ctx}）" if ctx else "") + ("（句頭のみ）" if e.head_only else "")
+
+
+def dict_conflicts(dic: "Dictionary", many: int = 4) -> list[Conflict]:
+    """辞書の中の競合・無駄を調べる。重いものから並べる（error → warn → info）。
+    error: 条件どおりの文でも、ほかの項目が先に当たって、この項目が使われない
+    warn:  何も変えない項目／無くても結果が同じ項目／置き換え後にエラーがある項目
+    info:  同じ YMM4側に、条件違いの項目が many 個以上ある"""
+    out: list[Conflict] = []
+    if dic._index is None:
+        dic._build_index()
+    for e in sorted(dic.entries, key=lambda x: x.key):
+        bad = [i for i in validate(e.dst) if i.level == "error"]
+        if bad:
+            out.append(Conflict("warn", "置き換え後にエラー", e,
+                                f"置き換え後が YMM4 で正しく読まれない形です（{bad[0].msg}）。辞書タブで直してください"))
+        text, at = _probe(e)
+        res, applied = dic.apply(text)
+        mine = [a for a in applied if a.entry is e]
+        if not mine:
+            # 何が先に当たったか: e の始まりを覆う当たり
+            cover = next((a for a in applied if a.entry.src and
+                          _src_span(text, applied, a)[0] <= at < _src_span(text, applied, a)[1]), None)
+            who = cover.entry if cover else None
+            if e.before or e.after:
+                why = (f"条件どおりの文「{text[len(PROBE_MARK):]}」でも、" +
+                       (f"長い項目「{_label(who)}」が先に当たります" if who else "ほかの項目が先に当たります") +
+                       "。長い項目を消すか、長い項目に別の場面の条件を付けて、当たる所を分けてください")
+            else:
+                why = ("この項目だけの文でも、" + (f"「{_label(who)}」が先に当たります" if who else "ほかの項目が先に当たります"))
+            out.append(Conflict("error", "ほかの項目に隠れて効かない", e, why, who))
+            continue
+        res2, applied2 = dic.apply(text, skip=e)
+        if res2 == res:
+            # 「YMM4側と置き換え後が同じ」項目でも、短い項目の誤爆よけとして働いているなら res2 != res になり、ここへは来ない
+            if normalize(e.src) == normalize(e.dst):
+                out.append(Conflict("warn", "何も変えない", e,
+                                    "YMM4側と置き換え後が同じで、ほかの項目の誤爆よけにもなっていません。消しても結果は変わりません"))
+                continue
+            s0, s1 = at, at + len(e.src)
+            alt = [a.entry for a in applied2 if _src_span(text, applied2, a)[0] < s1 and _src_span(text, applied2, a)[1] > s0]
+            names = "・".join(dict.fromkeys(_label(x) for x in alt))
+            out.append(Conflict("warn", "無くても結果が同じ", e,
+                                "この項目を消しても、同じ所が同じ形になります" +
+                                (f"（{names} で足りています）" if names else "") + "。整理するなら消してかまいません",
+                                alt[0] if alt else None))
+    by_src: dict[str, list[Entry]] = {}
+    for e in dic.entries:
+        by_src.setdefault(e.src, []).append(e)
+    for src, es in sorted(by_src.items()):
+        if len(es) >= many:
+            out.append(Conflict("info", "条件違いが多い", es[0],
+                                f"「{src}」には条件違いの項目が {len(es)} 個あります。意図どおりか、ときどき見直してください"))
+    order = {"error": 0, "warn": 1, "info": 2}
+    out.sort(key=lambda c: order[c.level])
+    return out
+
+
+def _src_span(text: str, applied: list[Applied], a: Applied) -> tuple[int, int]:
+    """当たり a が、元の文 text のどこからどこまでを置き換えたか（apply の結果の位置から逆算）"""
+    i = o = 0
+    for x in applied:
+        # 当たりの前の、置き換えなかった部分は1文字ずつ進む
+        gap = x.start - o
+        i += gap
+        o = x.start
+        if x is a:
+            return i, i + len(x.entry.src)
+        i += len(x.entry.src)
+        o = x.end
+    return -1, -1

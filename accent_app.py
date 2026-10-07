@@ -23,7 +23,7 @@ from tkinter import ttk, messagebox, filedialog
 import accent_core as core
 
 APP_NAME = "ゆっくりアクセント辞書"
-VERSION = "0.8.0"
+VERSION = "0.8.1"
 
 if getattr(sys, "frozen", False):
     BASE_DIR = os.path.dirname(sys.executable)
@@ -100,6 +100,7 @@ SHORTCUTS = [
 ]
 
 IS_WINDOWS = sys.platform.startswith("win")
+COUNTED_MAX = 5000   # 使用回数を数え終えた台詞の印を、いくつまで覚えておくか
 DEFAULT_PRESETS = ("まりさ", "れいむ")
 PLAYER_TIMEOUT = 60   # AquesTalkPlayer の書き出しを待つ上限（秒）
 
@@ -174,6 +175,9 @@ class App:
         self._infos: list[core.PhraseInfo] = []     # 変換結果の文節ごとの状態
         self._insight_job = None
         self.phrase_colors = tk.BooleanVar(value=self.conf.get("phrase_colors", True))
+        # 使用回数を数え終えた台詞の印（同じ台詞を何度変換しても1回と数えるため。新しい順に最大 COUNTED_MAX 件）
+        self._counted_order: list[str] = list(self.conf.get("counted_lines") or [])[-COUNTED_MAX:]
+        self._counted = set(self._counted_order)
 
         nb = ttk.Notebook(root)
         nb.pack(fill="both", expand=True, padx=8, pady=(8, 0))
@@ -256,6 +260,7 @@ class App:
         self.conf["muted"] = self.muted
         self.conf["auto_watch"] = bool(self.auto_watch.get())
         self.conf["phrase_colors"] = bool(self.phrase_colors.get())
+        self.conf["counted_lines"] = self._counted_order[-COUNTED_MAX:]
         try:
             with open(CONF_PATH, "w", encoding="utf-8") as f:
                 json.dump(self.conf, f, ensure_ascii=False, indent=1)
@@ -719,7 +724,9 @@ class App:
         self._show_issues(res.issues)
         if self.auto_copy.get() and res.text:
             self._copy(res.text)
-        if res.applied:
+        before = set(self._counted)
+        if core.count_usage(res.text, res.applied, self._counted):
+            self._counted_order += [k for k in self._counted if k not in before]
             self._fill_dict()   # 使用回数の表示を更新
         n_err = sum(i.level == "error" for i in res.issues)
         n_warn = len(res.issues) - n_err
@@ -1931,10 +1938,64 @@ class App:
         ttk.Button(bot, text="追加", command=self.add_entry).pack(side="left")
         ttk.Button(bot, text="編集", command=self.edit_entry).pack(side="left", padx=4)
         ttk.Button(bot, text="削除", command=self.delete_entries).pack(side="left")
+        ttk.Button(bot, text="競合を調べる…", command=self.check_conflicts).pack(side="left", padx=(16, 0))
         ttk.Button(bot, text="別名で書き出す…", command=self.export_dict).pack(side="right")
         ttk.Button(bot, text="バックアップから戻す…", command=self.restore_dict).pack(side="right", padx=(6, 0))
         ttk.Button(bot, text="他の辞書を取り込む…", command=self.import_dict).pack(side="right", padx=6)
         self._fill_dict()
+
+    def check_conflicts(self):
+        """辞書の競合チェック（辞書の DRC）。項目ごとに、その項目が当たるはずの最小の文を本物の辞書で変換して確かめる"""
+        found = core.dict_conflicts(self.dic)
+        n = {lv: sum(c.level == lv for c in found) for lv in core.CONFLICT_LEVEL}
+        if not found:
+            self._refresh_status(f"競合は見つかりませんでした（{len(self.dic.entries)}項目を調べました）")
+            messagebox.showinfo(APP_NAME, f"競合は見つかりませんでした。\n{len(self.dic.entries)}項目を調べました。", parent=self.root)
+            return
+        w = tk.Toplevel(self.root)
+        w.title("辞書の競合チェック")
+        w.transient(self.root)
+        ttk.Label(w, text=f"{len(self.dic.entries)}項目を調べました：効かない {n['error']}　無駄・要確認 {n['warn']}　お知らせ {n['info']}",
+                  padding=(10, 8, 10, 0)).pack(anchor="w")
+        ttk.Label(w, text="各項目が当たるはずの、いちばん短い文を作って、いまの辞書で変換して確かめています。"
+                          "行を選ぶと下に説明、ダブルクリックで辞書タブのその行を開きます",
+                  foreground="#666", padding=(10, 2), wraplength=self._sc(820)).pack(anchor="w")
+        cols = ("lv", "kind", "entry")
+        tv = ttk.Treeview(w, columns=cols, show="headings", height=min(14, len(found)), selectmode="browse")
+        for c, wd, txt in (("lv", 110, "重さ"), ("kind", 220, "種類"), ("entry", 420, "項目")):
+            tv.heading(c, text=txt)
+            tv.column(c, width=self._sc(wd), anchor="w", stretch=c == "entry")
+        tv.tag_configure("error", foreground=MSG_STYLE["crit"]["fg"])
+        tv.tag_configure("warn", foreground=MSG_STYLE["warn"]["fg"])
+        rows = {}
+        for i, c in enumerate(found):
+            tv.insert("", "end", iid=f"c{i}", values=(core.CONFLICT_LEVEL[c.level], c.kind, self._entry_label(c.entry)),
+                      tags=(c.level,))
+            rows[f"c{i}"] = c
+        tv.pack(fill="both", expand=True, padx=10, pady=6)
+        msg = tk.StringVar(value="行を選ぶと、ここに説明を出します")
+        ttk.Label(w, textvariable=msg, wraplength=self._sc(820), padding=(10, 0)).pack(anchor="w", fill="x")
+
+        def sel():
+            s_ = tv.selection()
+            return rows[s_[0]] if s_ else None
+
+        def on_select(_e=None):
+            c = sel()
+            if c:
+                msg.set(c.msg + (f"\n原因の項目：{self._entry_label(c.other)}" if c.other else ""))
+        tv.bind("<<TreeviewSelect>>", on_select)
+        tv.bind("<Double-1>", lambda e: sel() and self.open_in_dict(sel().entry))
+        bf = ttk.Frame(w, padding=10)
+        bf.pack(fill="x")
+        ttk.Button(bf, text="この項目を辞書タブで開く", command=lambda: sel() and self.open_in_dict(sel().entry)).pack(side="left")
+        ttk.Button(bf, text="原因の項目を開く",
+                   command=lambda: sel() and sel().other and self.open_in_dict(sel().other)).pack(side="left", padx=6)
+        ttk.Button(bf, text="調べ直す", command=lambda: (w.destroy(), self.check_conflicts())).pack(side="left")
+        ttk.Button(bf, text="閉じる", command=w.destroy).pack(side="right")
+        parts = [(f"競合チェック：", None), (f"効かない {n['error']}", "crit" if n["error"] else None), (" ／ ", None),
+                 (f"無駄・要確認 {n['warn']}", "warn" if n["warn"] else None), (f" ／ お知らせ {n['info']}", None)]
+        self._refresh_status(parts)
 
     def _sort_dict(self, col):
         self._sort_key = col
