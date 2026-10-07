@@ -23,7 +23,7 @@ from tkinter import ttk, messagebox, filedialog
 import accent_core as core
 
 APP_NAME = "ゆっくりアクセント辞書"
-VERSION = "0.8.1"
+VERSION = "0.9.0"
 
 if getattr(sys, "frozen", False):
     BASE_DIR = os.path.dirname(sys.executable)
@@ -174,6 +174,7 @@ class App:
         self._ap_tags: dict[str, core.Entry] = {}   # 辞書が当たった所のタグ名 → 当たった項目（タグは手直ししても文字に付いて動く）
         self._infos: list[core.PhraseInfo] = []     # 変換結果の文節ごとの状態
         self._insight_job = None
+        self._script_win = None    # 台本の一覧の窓（開いていれば、変換結果が変わるたびに書き直す）
         self.phrase_colors = tk.BooleanVar(value=self.conf.get("phrase_colors", True))
         # 使用回数を数え終えた台詞の印（同じ台詞を何度変換しても1回と数えるため。新しい順に最大 COUNTED_MAX 件）
         self._counted_order: list[str] = list(self.conf.get("counted_lines") or [])[-COUNTED_MAX:]
@@ -595,6 +596,7 @@ class App:
         top.pack(fill="x")
         ttk.Label(top, text="① YMM4の読み（初期状態）を貼り付け").pack(side="left")
         ttk.Button(top, text="クリア", command=lambda: self.in_text.delete("1.0", "end")).pack(side="right")
+        ttk.Button(top, text="ファイルを開く…", command=self.open_script_file).pack(side="right", padx=(0, 6))
         self._hint("paste_convert", ttk.Button(top, command=self.paste_and_convert), "貼り付けて変換").pack(side="right", padx=6)
         frm, self.in_text = self._text(tab, 5)
         frm.pack(fill="both", expand=True, pady=(4, 8))
@@ -644,6 +646,7 @@ class App:
         self._hint("next_unchecked", ttk.Button(ins, command=lambda: self.goto_unchecked(False)),
                    "次の未確認へ ▶").pack(side="right", padx=6)
         ttk.Button(ins, text="使われた辞書…", command=self.show_used_entries).pack(side="right")
+        ttk.Button(ins, text="台本の一覧…", command=self.show_script).pack(side="right", padx=(0, 6))
 
         bot = ttk.Frame(tab)
         bot.pack(fill="x")
@@ -1151,6 +1154,8 @@ class App:
         line = f"辞書 {sm['places']}か所（{'・'.join([str(sm['entries']) + '項目'] + extra)}）"
         line += f"　未確認 {n_un}文節" + (f"・誤爆注意 {n_risky}文節" if n_risky else "")
         self.insight.set(line)
+        if self._script_win is not None:
+            self._fill_script()
 
     def goto_unchecked(self, backward=False):
         """次（前）の未確認・誤爆注意の文節を選ぶ。選んだまま［試聴］すると、その文節だけを聞ける"""
@@ -1943,6 +1948,134 @@ class App:
         ttk.Button(bot, text="バックアップから戻す…", command=self.restore_dict).pack(side="right", padx=(6, 0))
         ttk.Button(bot, text="他の辞書を取り込む…", command=self.import_dict).pack(side="right", padx=6)
         self._fill_dict()
+
+    # ── 台本単位の一括チェック ──────────────────────
+    def open_script_file(self):
+        """YMM4 の読みを1行1台詞で書いたテキストファイルを、①に読み込んで変換する"""
+        path = filedialog.askopenfilename(parent=self.root, title="台本（読みのテキスト）を開く",
+                                          filetypes=[("テキスト", "*.txt"), ("すべて", "*.*")])
+        if not path:
+            return
+        raw = None
+        for enc in ("utf-8-sig", "cp932", "utf-16"):
+            try:
+                with open(path, encoding=enc) as f:
+                    raw = f.read()
+                break
+            except (UnicodeError, OSError):
+                continue
+        if raw is None:
+            messagebox.showerror(APP_NAME, f"読み込めませんでした（文字コードが分かりません）。\n{path}", parent=self.root)
+            return
+        self.in_text.delete("1.0", "end")
+        self.in_text.insert("1.0", raw.replace("\r\n", "\n"))
+        self.do_convert()
+        self.show_script()
+
+    def _script_rows(self):
+        t = self.out_text
+        cur = t.get("1.0", "end-1c")
+        return core.line_reports(cur, self._infos, self._applied_now(), core.validate(cur))
+
+    def show_script(self):
+        """台本（変換結果の全行）を1行1台詞として、行ごとの状態を一覧にする"""
+        if not self._out_converted:
+            self._refresh_status([("先に①に YMM4 の読みを貼って（または［ファイルを開く…］で読み込んで）［変換］してください", "warn")])
+            return
+        if self._script_win is not None:
+            self._script_win.lift()
+            self._fill_script()
+            return
+        w = tk.Toplevel(self.root)
+        w.title("台本の一覧")
+        w.transient(self.root)
+        self._script_win = w
+        w.protocol("WM_DELETE_WINDOW", self._close_script)
+        self._script_head = tk.StringVar()
+        ttk.Label(w, textvariable=self._script_head, font=self.fonts["head"], padding=(10, 8, 10, 0)).pack(anchor="w")
+        ttk.Label(w, text="1行を1台詞として数えます。行を選ぶと変換結果のその行を選び、［試聴］でその台詞だけを聞けます。"
+                          "未確認・誤爆注意・エラーが残っている行が「要確認」です",
+                  foreground="#666", padding=(10, 2), wraplength=self._sc(860)).pack(anchor="w")
+        fr = ttk.Frame(w)
+        fr.pack(fill="both", expand=True, padx=10, pady=6)
+        cols = ("no", "st", "places", "un", "risky", "err", "text")
+        tv = ttk.Treeview(fr, columns=cols, show="headings", height=14, selectmode="browse")
+        for c, wd, txt in (("no", 50, "行"), ("st", 80, "状態"), ("places", 60, "辞書"), ("un", 70, "未確認"),
+                           ("risky", 80, "誤爆注意"), ("err", 70, "エラー"), ("text", 460, "台詞")):
+            tv.heading(c, text=txt)
+            tv.column(c, width=self._sc(wd), anchor="w" if c == "text" else "center", stretch=c == "text")
+        tv.tag_configure("err", foreground=MSG_STYLE["crit"]["fg"])
+        tv.tag_configure("todo", foreground=MSG_STYLE["warn"]["fg"])
+        tv.tag_configure("done", foreground="#2a7a2a")
+        sb = ttk.Scrollbar(fr, command=tv.yview)
+        tv.configure(yscrollcommand=sb.set)
+        tv.pack(side="left", fill="both", expand=True)
+        sb.pack(side="right", fill="y")
+        self._script_tv = tv
+        tv.bind("<<TreeviewSelect>>", lambda e: self._select_line())
+        bf = ttk.Frame(w, padding=(10, 0, 10, 10))
+        bf.pack(fill="x")
+        ttk.Button(bf, text="次の要確認の台詞へ ▶", command=self._next_todo_line).pack(side="left")
+        ttk.Button(bf, text="この台詞をコピー", command=self._copy_line).pack(side="left", padx=6)
+        ttk.Button(bf, text="閉じる", command=self._close_script).pack(side="right")
+        self._fill_script()
+
+    def _close_script(self):
+        if self._script_win is not None:
+            self._script_win.destroy()
+        self._script_win = None
+
+    def _fill_script(self):
+        tv = self._script_tv
+        keep = tv.selection()
+        rows = self._script_rows()
+        self._script_data = {f"l{r.no}": r for r in rows}
+        tv.delete(*tv.get_children())
+        for r in rows:
+            st = "エラー" if r.errors else "要確認" if r.todo else "済"
+            tv.insert("", "end", iid=f"l{r.no}", values=(r.no, st, r.places or "", r.unchecked or "", r.risky or "",
+                                                        r.errors or "", self._short(r.text, 60)),
+                      tags=("err" if r.errors else "todo" if r.todo else "done",))
+        if keep and keep[0] in self._script_data:
+            tv.selection_set(keep[0])
+        sm = core.script_summary(rows)
+        self._script_head.set(f"全{sm['lines']}台詞　辞書 {sm['places']}か所　エラー {sm['errors']}　"
+                              f"要確認 {sm['todo_lines']}台詞（未確認 {sm['unchecked']}文節・誤爆注意 {sm['risky']}文節）　"
+                              f"済 {sm['done_lines']}台詞")
+
+    def _select_line(self):
+        sel = self._script_tv.selection()
+        if not sel or sel[0] not in self._script_data:
+            return
+        r = self._script_data[sel[0]]
+        t = self.out_text
+        t.tag_remove("sel", "1.0", "end")
+        t.tag_add("sel", f"1.0+{r.start}c", f"1.0+{r.end}c")
+        t.mark_set("insert", f"1.0+{r.start}c")
+        t.see(f"1.0+{r.start}c")
+
+    def _next_todo_line(self):
+        tv = self._script_tv
+        ids = list(tv.get_children())
+        sel = tv.selection()
+        start = ids.index(sel[0]) + 1 if sel and sel[0] in ids else 0
+        for iid in ids[start:] + ids[:start]:
+            if self._script_data[iid].todo:
+                tv.selection_set(iid)
+                tv.see(iid)
+                r = self._script_data[iid]
+                self._refresh_status(f"{r.no}行目：未確認 {r.unchecked}・誤爆注意 {r.risky}・エラー {r.errors}。"
+                                     f"変換結果で［次の未確認へ］（{self._key_label('next_unchecked')}）を押すと、この行の文節を順に選びます")
+                return
+        self._refresh_status("要確認の台詞はありません。全部の台詞が済みです")
+
+    def _copy_line(self):
+        sel = self._script_tv.selection()
+        if not sel:
+            return
+        r = self._script_data[sel[0]]
+        self._copy(core.normalize(r.text))
+        self._refresh_status(f"{r.no}行目をコピーしました。YMM4 のその台詞に貼り付けてください")
 
     def check_conflicts(self):
         """辞書の競合チェック（辞書の DRC）。項目ごとに、その項目が当たるはずの最小の文を本物の辞書で変換して確かめる"""

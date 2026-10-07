@@ -1825,3 +1825,60 @@ def _src_span(text: str, applied: list[Applied], a: Applied) -> tuple[int, int]:
         i += len(x.entry.src)
         o = x.end
     return -1, -1
+
+
+# ─────────────────────────────────────────────
+# 台本単位の一括チェック（1行 = 1台詞として、行ごとにまとめる）
+# ─────────────────────────────────────────────
+@dataclass
+class LineReport:
+    no: int            # 1 から数える行番号
+    start: int         # 変換結果の上での位置
+    end: int
+    text: str
+    places: int        # 辞書で置き換えた所の数
+    unchecked: int     # 未確認の文節
+    risky: int         # 誤爆注意の文節
+    manual: int        # 手で直した文節
+    errors: int
+    warns: int
+
+    @property
+    def todo(self) -> bool:
+        """まだ人が見るべき所が残っているか"""
+        return bool(self.unchecked or self.risky or self.errors)
+
+
+def line_reports(text: str, infos: list[PhraseInfo], applied: list[tuple[int, int, "Entry"]],
+                 issues: list[Issue]) -> list[LineReport]:
+    """変換結果を行ごとにまとめる。空の行は飛ばす"""
+    out = []
+    pos = 0
+    for no, ln in enumerate(text.split("\n"), 1):
+        s, e = pos, pos + len(ln)
+        pos = e + 1
+        if not ln.strip():
+            continue
+        inside = [p for p in infos if s <= p.start < e or (p.start == s and p.end <= e)]
+        out.append(LineReport(
+            no, s, e, ln,
+            places=sum(1 for a, b, _ in applied if s <= a < e),
+            unchecked=sum(p.status == "unchecked" for p in inside),
+            risky=sum(p.status == "risky" for p in inside),
+            manual=sum(p.status == "manual" for p in inside),
+            errors=sum(i.level == "error" and s <= i.start <= e for i in issues),
+            warns=sum(i.level != "error" and s <= i.start <= e for i in issues),
+        ))
+    return out
+
+
+def script_summary(rows: list[LineReport]) -> dict:
+    return {
+        "lines": len(rows),
+        "places": sum(r.places for r in rows),
+        "errors": sum(r.errors for r in rows),
+        "todo_lines": sum(r.todo for r in rows),
+        "unchecked": sum(r.unchecked for r in rows),
+        "risky": sum(r.risky for r in rows),
+        "done_lines": sum(not r.todo for r in rows),
+    }
