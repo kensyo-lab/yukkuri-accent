@@ -67,7 +67,7 @@ jobs:
         run: |
           if [ -f assets/icon.png ]; then
             python tools/make_icon.py assets/icon.png build_icon.ico
-            echo "ICON_ARGS=--icon build_icon.ico --add-data assets/icon.png;assets" >> "$GITHUB_ENV"
+            echo "ICON_ARGS=--icon build_icon.ico --add-data assets/icon.png;assets --add-data assets/help;assets/help" >> "$GITHUB_ENV"
           else
             echo "assets/icon.png が無いので、アイコンなしで作ります"
           fi

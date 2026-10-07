@@ -164,6 +164,7 @@ class App:
         self._bound = []
         self._hint_buttons = []      # (操作, ボタン, 文字) … ボタンにショートカットを書き添える
         self._help_icons = []        # ［？］の印（文字の大きさを変えたら描き直す）
+        self._help_imgs = {}         # (大きさ, マウスが乗っているか) → 画像
 
         self.color_marks = tk.BooleanVar(value=self.conf.get("color_marks", True))
         self.player_path = tk.StringVar(value=self.conf.get("aquestalk_player", ""))
@@ -1163,12 +1164,28 @@ class App:
         self._draw_help(cv, False)
         return cv
 
+    def _help_image(self, size, hover):
+        """「?」の印の画像（assets/help の、大きさごとに作っておいた縁のなめらかな PNG）。無ければ None"""
+        n = min(max(size, 12), 40)
+        key = (n, hover)
+        if key not in self._help_imgs:
+            path = os.path.join(RES_DIR, "assets", "help", f"help_{n}{'_hover' if hover else ''}.png")
+            try:
+                self._help_imgs[key] = tk.PhotoImage(file=path)
+            except tk.TclError:
+                self._help_imgs[key] = None
+        return self._help_imgs[key]
+
     def _draw_help(self, cv, hover=False):
-        """［？］の印：丸い輪の中に太い「？」。画像ではなく線で描くので、文字の大きさを変えてもぼやけない"""
+        """［？］の印：丸い輪の中に太い「？」。画像があれば画像を、無ければ線で描く（線だと縁がギザギザになる）"""
         try:
             size = self._sc(HELP_ICON)
             cv.configure(width=size, height=size)
             cv.delete("all")
+            img = self._help_image(size, hover)
+            if img is not None:
+                cv.create_image(size // 2, size // 2, image=img)
+                return
             col = "#1f5fbf" if hover else "black"
             w = max(1.5, size * 0.08)
             m = w / 2 + 1

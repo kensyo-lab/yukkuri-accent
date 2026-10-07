@@ -250,6 +250,7 @@ YMM4側のクセもいくつか後始末します。
 | `dictionaries/kensyo.json` | 作者（けんしょう）の辞書。参考に取り込めます |
 | `yukkuri-accent.pyw` | Pythonでダブルクリック起動するためのファイル |
 | `assets/icon.png` | アプリのアイコン |
+| `assets/help/` | 「?」の印の画像（`tools/make_help_icon.py` で作ります） |
 | `tools/make_icon.py` | アイコンPNGから .ico を作る道具（ビルド時に自動で使われます） |
 | `tools/make_changelog.py` | リリースノートをまとめて CHANGELOG.md を作る道具（ビルド時に自動で使われます） |
 | `.github/workflows/release.yml` | `v` で始まるタグを付けると、Windows版を自動で作って Releases に置く設定 |
