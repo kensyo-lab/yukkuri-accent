@@ -110,6 +110,7 @@ PHRASE_COLOR_HELP = (
     "［次の未確認へ ▶］（F11）で未確認・誤爆注意の文節を順に選び、そのまま［試聴］（F5）でその文節だけを聞けます。"
     "良ければ右クリック →「この文節を確認済みにする」で色が消えます。\n"
     "手で直した文節は、［手直しを辞書の候補に送る →］で、まとめて辞書の候補（学習タブ）に送れます。直すたびに聞いたりはしません。")
+HELP_ICON = 18       # ［？］の印の大きさ（100% のときのピクセル）
 COUNTED_MAX = 5000   # 使用回数を数え終えた台詞の印を、いくつまで覚えておくか
 DEFAULT_PRESETS = ("まりさ", "れいむ")
 PLAYER_TIMEOUT = 60   # AquesTalkPlayer の書き出しを待つ上限（秒）
@@ -162,6 +163,7 @@ class App:
         self.shortcuts = {k: v for k, v in (self.conf.get("shortcuts") or {}).items()}
         self._bound = []
         self._hint_buttons = []      # (操作, ボタン, 文字) … ボタンにショートカットを書き添える
+        self._help_icons = []        # ［？］の印（文字の大きさを変えたら描き直す）
 
         self.color_marks = tk.BooleanVar(value=self.conf.get("color_marks", True))
         self.player_path = tk.StringVar(value=self.conf.get("aquestalk_player", ""))
@@ -405,6 +407,8 @@ class App:
         if hasattr(self, "scale_var"):
             self.scale_var.set(round(new * 100))
         self._draw_accent_panel()
+        for cv in self._help_icons:
+            self._draw_help(cv)
         self._save_conf()
         self._refresh_status(f"文字の大きさ：{round(new * 100)}%")
 
@@ -1149,7 +1153,31 @@ class App:
             b.focus_set()
             w.bind("<Escape>", lambda e: w.destroy())
             w.bind("<Return>", lambda e: w.destroy())
-        return ttk.Button(parent, text="？", width=3, command=show)
+        size = self._sc(HELP_ICON)
+        bg = self.style.lookup("TFrame", "background") or parent.winfo_toplevel().cget("bg")
+        cv = tk.Canvas(parent, width=size, height=size, highlightthickness=0, bd=0, bg=bg, cursor="hand2")
+        cv.bind("<Button-1>", lambda e: show())
+        cv.bind("<Enter>", lambda e: self._draw_help(cv, True))
+        cv.bind("<Leave>", lambda e: self._draw_help(cv, False))
+        self._help_icons.append(cv)
+        self._draw_help(cv, False)
+        return cv
+
+    def _draw_help(self, cv, hover=False):
+        """［？］の印：丸い輪の中に太い「？」。画像ではなく線で描くので、文字の大きさを変えてもぼやけない"""
+        try:
+            size = self._sc(HELP_ICON)
+            cv.configure(width=size, height=size)
+            cv.delete("all")
+            col = "#1f5fbf" if hover else "black"
+            w = max(1.5, size * 0.08)
+            m = w / 2 + 1
+            cv.create_oval(m, m, size - m, size - m, outline=col, width=w)
+            f = tkfont.Font(family=self.fonts["ui"].actual("family"), size=-max(8, round(size * 0.62)), weight="bold")
+            cv.create_text(size / 2, size / 2 + 0.5, text="?", fill=col, font=f)
+            cv._font = f     # 消されないように持っておく
+        except tk.TclError:
+            pass
 
     # ── 変換結果の見える化 ────────────────────────
     def _off(self, idx) -> int:
@@ -2563,7 +2591,7 @@ class App:
         if not IS_WINDOWS:
             note += "\n\n※ AquesTalkPlayerは Windows 用のソフトなので、この環境では試聴できません。"
         self._help(hd, "試聴（AquesTalkPlayer）について", note).pack(side="left", padx=8)
-        ttk.Label(tab, text="変換タブの［▶ 試聴］に使います。「まりさ」「れいむ」のままだと棒読みになります（［？］で直し方）",
+        ttk.Label(tab, text="変換タブの［▶ 試聴］に使います。「まりさ」「れいむ」のままだと棒読みになります（タイトル横の ? の印で直し方）",
                   foreground="#444").pack(anchor="w", pady=(4, 0))
 
         # 文字の大きさ
