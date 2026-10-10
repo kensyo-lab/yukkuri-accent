@@ -608,6 +608,7 @@ class Finding:
     msg: str
     action: str = ""     # できる操作（読みを登録 / 単位を登録 / 目視確認 …）
     level: str = "warn"
+    data: dict = field(default_factory=dict)   # 操作に使う情報（候補・位置など）
 
 
 @dataclass
@@ -879,20 +880,139 @@ def number_findings(s: str) -> list[Finding]:
     return out
 
 
-def english_findings(s: str) -> list[Finding]:
-    """英字の読み間違いらしき所。文節の頭の「ん」は、日本語にはまず無いので、英字由来とみなす（802.11n の n など）"""
-    out = []
-    tags = [(m.start(), m.end()) for m in TAG_RE.finditer(s)]
-    for i, c in enumerate(s):
-        if c not in "んン" or any(a <= i < b for a, b in tags):
-            continue
-        if i == 0 or s[i - 1] in BOUNDARY or s[i - 1] == ">":
-            k = i
-            while k < len(s) and s[k] not in BOUNDARY and s[k] != "<":
-                k += 1
-            out.append(Finding("英字", "n_head", s[i:k], f"文節の頭に「ん」があります：{s[i:k]}（英字の読み間違いの可能性）",
-                               "読みを登録"))
+# ── 英字レイヤー ──
+# 英字は YMM4 がカナにしてから届く。英字読み辞書のキーは「YMM4 が出した読み」（えぬいーえーあーる など）。
+# 文節の頭で一致したときだけ置き換える。辞書の項目がアクセントを持てば、その部分は通常のアクセント辞書から守る
+# （英字由来の「なさ」が、日本語の「〜がなさそう」用の登録とぶつからないように）。
+EN_OPEN, EN_CLOSE = "\ue002", "\ue003"   # 英字読み辞書のアクセントで決めた所（通常の辞書を当てない）
+
+# YMM4 が1文字ずつ読むときのアルファベット名（全部大文字の語は1文字ずつ読まれる）
+ALPHA_NAMES = sorted({"えー", "びー", "しー", "でぃー", "いー", "えふ", "じー", "えいち", "えっち", "あい", "じぇー",
+                      "じぇい", "けー", "える", "えむ", "えぬ", "おー", "ぴー", "きゅー", "あーる", "えす", "え_ス",
+                      "てぃー", "ゆー", "ぶい", "だぶりゅー", "えっくす", "えっく_ス", "わい", "ぜっと", "ずぃー"},
+                     key=len, reverse=True)
+
+
+@dataclass
+class EnglishHit:
+    """英字読み辞書で置き換えた所"""
+    ymm4_reading: str
+    reading: str
+    accent: str          # 項目のアクセント（無ければ空。通常のアクセント辞書に任せた）
+    source: str
+    origin: str
+
+
+def english_table(user: dict | None = None) -> dict:
+    """辞書の english_dictionary（YMM4の読み → 項目）。既定の項目は持たない（クリエイターが育てるもの）"""
+    out = {}
+    for k, e in (user or {}).items():
+        if isinstance(e, dict) and isinstance(e.get("reading"), str) and e["reading"]:
+            out[normalize(k)] = dict(e, origin="辞書")
     return out
+
+
+def _phrase_head(s: str, i: int) -> bool:
+    return i == 0 or s[i - 1] in BOUNDARY or s[i - 1] == ">"
+
+
+def apply_english(s: str, table: dict) -> tuple[str, list[EnglishHit]]:
+    """英字読み辞書を当てる（長い読みが先、文節の頭だけ）。<タグ> の中は見ない"""
+    if not table:
+        return s, []
+    keys = sorted(table, key=len, reverse=True)
+    out, hits, i = [], [], 0
+    while i < len(s):
+        if s[i] == "<":
+            j = s.find(">", i)
+            if j > 0:
+                out.append(s[i:j + 1])
+                i = j + 1
+                continue
+        k = next((k for k in keys if s.startswith(k, i)), None) if _phrase_head(s, i) else None
+        if k:
+            e = table[k]
+            acc = normalize(e.get("accent") or "")
+            out.append(EN_OPEN + acc + EN_CLOSE if acc else normalize(e["reading"]))
+            hits.append(EnglishHit(k, e["reading"], acc, e.get("source", ""), e.get("origin", "")))
+            i += len(k)
+        else:
+            out.append(s[i])
+            i += 1
+    return "".join(out), hits
+
+
+def strip_marks(s: str) -> str:
+    return s.replace(EN_OPEN, "").replace(EN_CLOSE, "")
+
+
+def _alpha_run(s: str) -> tuple[int, int]:
+    """s の頭から、アルファベット名を最も長くつなげた所 (文字数, 名の数)。つながらなければ (0, 0)"""
+    best = {0: 0}
+    for i in range(len(s)):
+        if i not in best:
+            continue
+        for nm in ALPHA_NAMES:
+            if s.startswith(nm, i) and best.get(i + len(nm), -1) < best[i] + 1:
+                best[i + len(nm)] = best[i] + 1
+    end = max(best)
+    return end, best[end]
+
+
+def english_findings(s: str) -> list[Finding]:
+    """英字の読み間違いらしき所。
+    ・英字の頭字語らしき読み: アルファベット名が2つ以上続き、後ろが助詞などだけの文節（日本語にはまず現れない並び。
+      同じ名の繰り返し「わいわい」などは除く）
+    ・文節の頭の「ん」: 日本語にはまず無いので、英字由来とみなす（802.11n の n など）
+    英字読み辞書で置き換えた所（EN_OPEN〜EN_CLOSE）と <タグ> の中は見ない"""
+    out = []
+    skip = [(m.start(), m.end()) for m in TAG_RE.finditer(s)]
+    skip += [(m.start(), m.end()) for m in re.finditer(f"{EN_OPEN}[^{EN_CLOSE}]*{EN_CLOSE}", s)]
+    for i, c in enumerate(s):
+        if not _phrase_head(s, i) or any(a <= i < b for a, b in skip):
+            continue
+        k = i
+        while k < len(s) and s[k] not in BOUNDARY and s[k] not in ("<", EN_OPEN):
+            k += 1
+        phrase = s[i:k]
+        if c in "んン":
+            out.append(Finding("英字", "n_head", phrase, f"文節の頭に「ん」があります：{phrase}（英字の読み間違いの可能性）",
+                               "読みを登録", data={"ymm4_reading": phrase}))
+            continue
+        end, count = _alpha_run(phrase)
+        run = phrase[:end]
+        doubled = count == 2 and len(run) % 2 == 0 and run[:len(run) // 2] == run[len(run) // 2:]   # わいわい・おーおー は日本語
+        if count >= 2 and not doubled and _is_tail(phrase[end:]):
+            out.append(Finding("英字", "acronym", phrase[:end], f"英字の頭字語らしき読み：{phrase[:end]}（未登録）",
+                               "読みを登録", data={"ymm4_reading": phrase[:end]}))
+    return out
+
+
+# ── 後続パターン ──
+# 「について」の前で句を切る、のように、後ろに来る語の側に1回書けば、どの語の後ろでも効く。
+# 辞書の follow_patterns: {"について": {"sep": "/"}}。辞書の項目が当たった所の中には入れない（辞書の方が具体的）
+def apply_follow(s: str, patterns: dict, spans: list[tuple[int, int]]) -> tuple[str, list[int]]:
+    """後続パターンの前に区切りを入れる。戻り値: (新しい文字列, 区切りを入れた位置（元の文字列での位置）)"""
+    ins: dict[int, str] = {}
+    tags = [(m.start(), m.end()) for m in TAG_RE.finditer(s)]
+    for pat in sorted(patterns, key=len, reverse=True):
+        sep = patterns[pat].get("sep", "/") if isinstance(patterns[pat], dict) else ""
+        p = normalize(pat)
+        if not p or not sep:
+            continue
+        i = s.find(p)
+        while i > 0:
+            if (s[i - 1] not in BOUNDARY and i not in ins and not any(a < i < b for a, b in spans + tags)):
+                ins[i] = sep
+            i = s.find(p, i + 1)
+    if not ins:
+        return s, []
+    out, last = [], 0
+    for i in sorted(ins):
+        out.append(s[last:i] + ins[i])
+        last = i
+    out.append(s[last:])
+    return "".join(out), sorted(ins)
 
 
 # ─────────────────────────────────────────────
@@ -951,7 +1071,7 @@ class Applied:
     entry: Entry
 
 
-CTX_IGNORE = set(ACCENT + DEVOICE + SEPS + SPACES)
+CTX_IGNORE = set(ACCENT + DEVOICE + SEPS + SPACES + "\ue002\ue003")   # 英字読み辞書の目印も見ない
 
 
 def ctx_plain(t: str) -> str:
@@ -992,7 +1112,7 @@ def entry_priority(e: "Entry"):
 # ── 辞書の形式（schema）の版と移行 ──
 # 形式の版は "version"（整数）で持ち、アプリの版とは切り離す。
 #   1: 条件なし（v0.2〜）  2: 前後の条件つき（v0.7〜。項目の形は1と同じ）
-#   3: 英字読み辞書・単位辞書・数字の表の欄を持つ（v1.0.0〜）
+#   3: 英字読み辞書・単位辞書・数字の表・例外表・後続パターンの欄を持つ（v1.0.0〜）
 #
 # 移行の決まり:
 # 1. 辞書の中身を壊さない。
@@ -1001,7 +1121,7 @@ def entry_priority(e: "Entry"):
 # 4. 移行は1段ずつ行う。
 # 5. このアプリが分かるより新しい形式の辞書は、書き込まない（読み取り専用で開く）。
 SCHEMA_VERSION = 3
-SECTIONS = ("english_dictionary", "unit_dictionary", "number_rules", "number_exceptions")
+SECTIONS = ("english_dictionary", "unit_dictionary", "number_rules", "number_exceptions", "follow_patterns")
 
 
 class DictionaryMigrationError(Exception):
@@ -1175,6 +1295,51 @@ class Dictionary:
         """既定の例外に、この辞書の number_exceptions を重ねた表"""
         return number_exception_table(self.sections.get("number_exceptions"))
 
+    def english_table(self) -> dict:
+        return english_table(self.sections.get("english_dictionary"))
+
+    def follow_patterns(self) -> dict:
+        v = self.sections.get("follow_patterns")
+        return v if isinstance(v, dict) else {}
+
+    def set_english(self, ymm4_reading: str, reading: str, accent: str = "", source: str = "") -> str:
+        """英字読み辞書に登録する（同じ YMM4 の読みは上書き。項目の知らない情報は残す）"""
+        self._check_writable()
+        key = normalize(ymm4_reading).strip()
+        sec = self.sections.setdefault("english_dictionary", {})
+        old = sec.get(key)
+        e = dict(old) if isinstance(old, dict) else {}
+        e.update({"reading": normalize(reading).strip()})
+        for k, v in (("accent", normalize(accent).strip()), ("source", source.strip())):
+            if v:
+                e[k] = v
+            else:
+                e.pop(k, None)
+        sec[key] = e
+        return "updated" if old else "added"
+
+    def add_unit_reading(self, unit_id: str, ymm4_reading: str, reading: str = "", source: str = "") -> str:
+        """単位辞書に登録する。同じ単位IDがあれば YMM4 の読みを足す（reading を入れればそれも書き換える）。
+        既定の単位に足すときは、既定の項目を写してから足す"""
+        self._check_writable()
+        uid, r = unit_id.strip(), normalize(ymm4_reading).strip()
+        sec = self.sections.setdefault("unit_dictionary", {})
+        base = sec.get(uid) or DEFAULT_UNITS.get(uid)
+        e = copy.deepcopy(base) if isinstance(base, dict) else {}
+        if reading.strip():
+            e["reading"] = normalize(reading).strip()
+        if not e.get("reading"):
+            raise ValueError("単位の読みがありません。")
+        rs = list(e.get("ymm4_readings", []))
+        if r and r not in rs:
+            rs.append(r)
+        e["ymm4_readings"] = rs
+        if source.strip():
+            e["source"] = source.strip()
+        kind = "updated" if uid in sec or uid in DEFAULT_UNITS else "added"
+        sec[uid] = e
+        return kind
+
     # 編集 -----------------------------------------------------------
     def find(self, src: str, before: str = "", after: str = "") -> Entry | None:
         """YMM4側と前後の条件が同じ項目（条件を省くと、条件なしの項目）"""
@@ -1232,25 +1397,52 @@ class Dictionary:
             v.sort(key=entry_priority)
         self._index = idx
 
-    def apply(self, s: str, skip: "Entry | None" = None) -> tuple[str, list[Applied]]:
+    def apply(self, s: str, skip: "Entry | None" = None,
+              conflicts: list | None = None) -> tuple[str, list[Applied]]:
         """辞書を当てる。skip の項目は無いものとして扱う（競合チェックで「これが無かったら」を試すため）。
-        使用回数はここでは数えない（count_usage で、同じ台詞を何度変換しても1回と数える）"""
+        使用回数はここでは数えない（count_usage で、同じ台詞を何度変換しても1回と数える）。
+        英字読み辞書で決めた所（EN_OPEN〜EN_CLOSE）には当てず、目印は外す。
+        conflicts を渡すと、同じ優先順位で置き換え後が食い違う項目が当たる所は、自動で決めずにそのまま残し、
+        (開始, 終了, YMM4側, [候補の項目]) を足す"""
         if self._index is None:
             self._build_index()
         out, applied = [], []
         olen = 0
         i = 0
         while i < len(s):
+            if s[i] == EN_OPEN:
+                j = s.find(EN_CLOSE, i)
+                j = len(s) if j < 0 else j
+                out.append(s[i + 1:j])
+                olen += j - i - 1
+                i = j + 1
+                continue
+            if s[i] == EN_CLOSE:
+                i += 1
+                continue
             hit = None
+            ties = []
             for e in self._index.get(s[i], ()):
                 if e is not skip and s.startswith(e.src, i):
                     if e.head_only and i > 0 and s[i - 1] not in BOUNDARY:
                         continue
                     if (e.before or e.after) and not ctx_match(e, s, i, i + len(e.src)):
                         continue
-                    hit = e
-                    break
-            if hit:
+                    if hit is None:
+                        hit = e
+                        if conflicts is None:
+                            break
+                    elif entry_priority(e)[:3] == entry_priority(hit)[:3]:
+                        ties.append(e)
+                    else:
+                        break
+            ties = [e for e in ties if e.dst != hit.dst] if hit else []
+            if ties:
+                conflicts.append((olen, olen + len(hit.src), hit.src, [hit] + ties))
+                out.append(hit.src)
+                olen += len(hit.src)
+                i += len(hit.src)
+            elif hit:
                 out.append(hit.dst)
                 applied.append(Applied(olen, olen + len(hit.dst), hit))
                 olen += len(hit.dst)
@@ -1636,6 +1828,7 @@ class Result:
     findings: list["Finding"] = field(default_factory=list)   # 人が確かめる所（変換はしない）
     units: list["UnitHit"] = field(default_factory=list)      # 単位に解決した所と、決め手になった項目
     numbers: list["NumberHit"] = field(default_factory=list)  # 数字ごとの、読みとつなぎ方の決め手
+    english: list["EnglishHit"] = field(default_factory=list) # 英字読み辞書で置き換えた所
 
 
 @dataclass
@@ -1644,31 +1837,50 @@ class Prepared:
     findings: list["Finding"]
     units: list["UnitHit"]
     numbers: list["NumberHit"] = field(default_factory=list)
+    english: list["EnglishHit"] = field(default_factory=list)
 
 
-def preprocess(raw: str, numbers: dict, units: dict | None = None, ex: dict | None = None) -> Prepared:
-    """辞書を当てる直前の形と、各段の指摘。units は unit_table()、ex は number_exception_table() の表
-    （省略すると既定のものだけ）"""
+def preprocess(raw: str, numbers: dict, units: dict | None = None, ex: dict | None = None,
+               english: dict | None = None) -> Prepared:
+    """辞書を当てる直前の形と、各段の指摘。units は unit_table()、ex は number_exception_table()、
+    english は english_table() の表（省略すると既定のものだけ）。
+    英字読み辞書のアクセントで決めた所には EN_OPEN〜EN_CLOSE の目印が付く（Dictionary.apply が外す）"""
     units = unit_table() if units is None else units
     s = normalize(raw)
     findings = number_findings(s)
+    s, en_hits = apply_english(s, english or {})
     s, hits, unit_found = resolve_units(s, units, numbers)
     findings += english_findings(s) + unit_found
     log: list = []
     text = expand_numbers(s, numbers, units=units, ex=ex, log=log)
     findings += [x for x in log if isinstance(x, Finding)]
-    return Prepared(text, findings, hits, [x for x in log if isinstance(x, NumberHit)])
+    return Prepared(text, findings, hits, [x for x in log if isinstance(x, NumberHit)], en_hits)
 
 
-def prepare(raw: str, numbers: dict, units: dict | None = None, ex: dict | None = None) -> str:
-    """辞書を当てる直前の形（正規化＋単位の解決＋数字展開）。学習でも同じものを使う。"""
-    return preprocess(raw, numbers, units, ex).text
+def prepare(raw: str, numbers: dict, units: dict | None = None, ex: dict | None = None,
+            english: dict | None = None) -> str:
+    """辞書を当てる直前の形（正規化＋英字＋単位の解決＋数字展開）。学習でも同じものを使う。"""
+    return strip_marks(preprocess(raw, numbers, units, ex, english).text)
 
 
 def convert(raw: str, dic: Dictionary, numbers: dict) -> Result:
-    pre = preprocess(raw, numbers, dic.unit_table(), dic.exception_table())
-    s, applied = dic.apply(pre.text)
-    return Result(s, applied, validate(s), pre.findings, pre.units, pre.numbers)
+    pre = preprocess(raw, numbers, dic.unit_table(), dic.exception_table(), dic.english_table())
+    conflicts: list = []
+    s, applied = dic.apply(pre.text, conflicts=conflicts)
+    findings = list(pre.findings)
+    if dic.follow_patterns():
+        s, ins = apply_follow(s, dic.follow_patterns(), [(a.start, a.end) for a in applied] +
+                              [(c[0], c[1]) for c in conflicts])
+        if ins:
+            def sh(x, at_start):
+                return x + sum(1 for p in ins if (p <= x if at_start else p < x))
+            applied = [Applied(sh(a.start, True), sh(a.end, False), a.entry) for a in applied]
+            conflicts = [(sh(a, True), sh(b, False), src, es) for a, b, src, es in conflicts]
+    for a, b, src, es in conflicts:
+        cands = " ／ ".join(f"{e.dst}（{ctx_label(e.before, e.after) or '条件なし'}）" for e in es)
+        findings.append(Finding("文脈", "accent_conflict", src, f"複数のアクセント候補：{src} → {cands}",
+                                "候補から選ぶ", data={"start": a, "end": b, "entries": es}))
+    return Result(s, applied, validate(s), findings, pre.units, pre.numbers, pre.english)
 
 
 # ─────────────────────────────────────────────
@@ -1722,7 +1934,8 @@ def _skel_len(s: str) -> int:
 def learn(before_raw: str, after_raw: str, numbers: dict, dic: Dictionary | None = None) -> list[Candidate]:
     units = dic.unit_table() if dic else unit_table()
     ex = dic.exception_table() if dic else None
-    b_units = resolve_units(normalize(before_raw), units, numbers)[0]
+    b_en = strip_marks(apply_english(normalize(before_raw), dic.english_table() if dic else {})[0])
+    b_units = resolve_units(b_en, units, numbers)[0]
     b_all = expand_numbers(b_units, numbers, mark=True, units=units, ex=ex).split("\n")
     a_all = normalize(after_raw).split("\n")
     cands: list[Candidate] = []

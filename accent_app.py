@@ -743,6 +743,7 @@ class App:
         self.issue_list = tk.Listbox(tab, height=4, font=self.f_ui, activestyle="none")
         self.issue_list.pack(fill="x")
         self.issue_list.bind("<<ListboxSelect>>", self._on_issue_click)
+        self.issue_list.bind("<Double-Button-1>", self._on_issue_dbl)
         self._issues: list[core.Issue] = []
         self._findings: list[core.Finding] = []   # 最後の変換で見つけた「人が確かめる所」（手直ししても残す）
 
@@ -819,7 +820,8 @@ class App:
             self.issue_list.insert("end", f"{mark}　{i.start + 1}文字目: {i.msg}")
             self.issue_list.itemconfig("end", fg="#b00000" if i.level == "error" else "#a05a00")
         for f in self._findings:
-            self.issue_list.insert("end", f"◇ 確認　［{f.stage}］{f.msg}")   # f.action（登録などの操作）は、操作を作ったら出す
+            act = f"　（ダブルクリックで{f.action}）" if f.kind in self.FINDING_ACTIONS else ""
+            self.issue_list.insert("end", f"◇ 確認　［{f.stage}］{f.msg}{act}")
             self.issue_list.itemconfig("end", fg="#2a5aa0")
         if not issues and not self._findings:
             self.issue_list.insert("end", "問題は見つかりませんでした。")
@@ -845,6 +847,112 @@ class App:
         self.out_text.tag_add("sel", f"1.0+{i.start}c", f"1.0+{i.end}c")
         self.out_text.see(f"1.0+{i.start}c")
         self.out_text.focus_set()
+
+    # 指摘の種類 → ダブルクリックしたときの操作
+    FINDING_ACTIONS = {"acronym": "_register_english", "n_head": "_register_english",
+                       "unit_unknown": "_register_unit", "accent_conflict": "_choose_candidate"}
+
+    def _on_issue_dbl(self, _e):
+        sel = self.issue_list.curselection()
+        if not sel or sel[0] < len(self._issues):
+            return "break"
+        k = sel[0] - len(self._issues)
+        if k < len(self._findings) and self._findings[k].kind in self.FINDING_ACTIONS:
+            getattr(self, self.FINDING_ACTIONS[self._findings[k].kind])(self._findings[k])
+        return "break"
+
+    def _register_english(self, f):
+        """英字の読みを英字読み辞書に登録する（YMM4の読み → 正しい読み・アクセント）"""
+        if not self._dict_writable():
+            return
+        r = FormDialog(self.root, self, "英字の読みを登録", [
+            ("ymm4", "YMM4の読み", f.data.get("ymm4_reading", f.text), ""),
+            ("reading", "正しい読み", "", "例：なさ"),
+            ("accent", "アクセント（任意）", "", "例：な'さ　空なら、通常のアクセント辞書に任せます"),
+            ("source", "原文の表記（任意）", "", "例：NASA　メモとして残します")],
+            required=("ymm4", "reading")).result
+        if not r:
+            return
+        if r["accent"] and core.normalize(r["accent"]).replace("'", "").replace("/", "") != core.normalize(r["reading"]).replace("/", ""):
+            if not messagebox.askyesno(APP_NAME, "アクセントの仮名が、正しい読みと違います。このまま登録しますか？"):
+                return
+        kind = self.dic.set_english(r["ymm4"], r["reading"], r["accent"], r["source"])
+        self.save_dict()
+        self._refresh_status(f"英字読み辞書に{'登録' if kind == 'added' else '上書き'}しました："
+                             f"{core.normalize(r['ymm4'])} → {r['accent'] or r['reading']}。もう一度［変換］すると使います。")
+
+    def _register_unit(self, f):
+        """数字の直後の読みを、単位辞書に登録する"""
+        if not self._dict_writable():
+            return
+        known = "、".join(sorted(self.dic.unit_table()))
+        r = FormDialog(self.root, self, "単位を登録", [
+            ("ymm4", "YMM4の読み", f.text, ""),
+            ("unit", "単位ID", "", f"英数字で。今ある単位に読みを足すときは同じIDに（{known}）"),
+            ("reading", "単位の読み＋アクセント", "", "例：ぱ'すかる　今ある単位に足すときは空でも可"),
+            ("source", "原文の表記（任意）", "", "例：Pa")],
+            required=("ymm4", "unit")).result
+        if not r:
+            return
+        if not re.fullmatch(r"[A-Za-z0-9_]+", r["unit"]):
+            messagebox.showerror(APP_NAME, "単位IDは英数字と _ で書いてください（例：pascal）。")
+            return
+        try:
+            kind = self.dic.add_unit_reading(r["unit"], r["ymm4"], r["reading"], r["source"])
+        except ValueError as ex:
+            messagebox.showerror(APP_NAME, f"{ex}\n新しい単位には、読みとアクセントを入れてください。")
+            return
+        self.save_dict()
+        self._refresh_status(f"単位辞書に{'登録' if kind == 'added' else '読みを足し'}ました：{core.normalize(r['ymm4'])} → {r['unit']}。"
+                             "もう一度［変換］すると使います。")
+
+    def _choose_candidate(self, f):
+        """複数のアクセント候補から1つを選び、変換結果に入れる。選んだ形は、前後の条件つきの項目として登録できる"""
+        es = f.data.get("entries", [])
+        if not es:
+            return
+        w = tk.Toplevel(self.root)
+        w.title("候補から選ぶ")
+        w.transient(self.root)
+        ttk.Label(w, padding=10, text=f"「{f.text}」に当たる項目が、同じ優先順位で食い違っています。どれにしますか？").pack(anchor="w")
+        lb = tk.Listbox(w, font=self.f_entry, height=min(8, len(es)), activestyle="none")
+        for e in es:
+            lb.insert("end", f"{e.dst}　（{core.ctx_label(e.before, e.after) or '条件なし'}）")
+        lb.pack(fill="both", expand=True, padx=10)
+        lb.selection_set(0)
+        reg = tk.BooleanVar(value=True)
+        ttk.Checkbutton(w, text="選んだ形を、前後の条件つきで辞書に登録する（次からはこれが優先されます）",
+                        variable=reg).pack(anchor="w", padx=10, pady=6)
+
+        def ok():
+            sel = lb.curselection()
+            if not sel:
+                return
+            e = es[sel[0]]
+            w.destroy()
+            a, b = f.data.get("start", -1), f.data.get("end", -1)
+            cur = self.out_text.get("1.0", "end-1c")
+            if 0 <= a < b <= len(cur) and cur[a:b] == f.text:
+                self.out_text.delete(f"1.0+{a}c", f"1.0+{b}c")
+                self.out_text.insert(f"1.0+{a}c", e.dst)
+            if reg.get() and self._dict_writable():
+                before = next((x.before for x in es if x.before), "")
+                after = next((x.after for x in es if x.after), "")
+                r = EntryDialog(self.root, self, "選んだ形を辞書に登録", f.text, e.dst, e.head_only, e.note,
+                                before, after).result
+                if r:
+                    src, dst, head, note, before, after = r
+                    self.dic.upsert(src, dst, head, note, before, after)
+                    self.save_dict()
+                    self._fill_dict()
+                    self._refresh_status("選んだ形を、前後の条件つきで辞書に登録しました")
+
+        bf = ttk.Frame(w, padding=10)
+        bf.pack(fill="x")
+        ttk.Button(bf, text="OK", command=ok).pack(side="right")
+        ttk.Button(bf, text="キャンセル", command=w.destroy).pack(side="right", padx=6)
+        lb.bind("<Double-Button-1>", lambda e: ok())
+        w.grab_set()
 
     def _copy(self, s):
         self.root.clipboard_clear()
@@ -2075,7 +2183,7 @@ class App:
                         command=self._fill_dict).pack(side="left", padx=(8, 4))
         self.risky_info = tk.StringVar()
         ttk.Label(top, textvariable=self.risky_info, foreground=MSG_STYLE["warn"]["fg"]).pack(side="left")
-        ttk.Button(top, text="数字の読み表…", command=self.edit_numbers).pack(side="right")
+        ttk.Button(top, text="数字・英字・単位の表…", command=self.edit_numbers).pack(side="right")
 
         cols = ("src", "dst", "ctx", "head", "hits", "added", "warn", "note")
         tv = ttk.Treeview(tab, columns=cols, show="headings", selectmode="extended")
@@ -2601,23 +2709,29 @@ class App:
         if p:
             self.dic.save(p, VERSION)
 
+    EDITABLE_TABLES = ("number_rules", "number_exceptions", "english_dictionary", "unit_dictionary", "follow_patterns")
+
     def edit_numbers(self):
         """数字の読み表（書き換えた欄）と例外表を、JSON のまま書き換える画面。既定の表と既定の例外は参照用に並べる"""
         w = tk.Toplevel(self.root)
-        w.title("数字の読み表")
+        w.title("数字・英字・単位の表")
         w.geometry("900x600")
         w.transient(self.root)
         ttk.Label(w, padding=(10, 8, 10, 0), wraplength=860, justify="left",
-                  text="左の2つは、あなたが書き換えた所だけを書きます（書いていない欄は既定のまま使い、アプリの更新で既定が良くなればそのまま届きます）。"
-                       "欄を null にすると「未確定」になり、変換中に使うと指摘します。右の2つは参照用の既定値です。").pack(fill="x")
+                  text="数字の表と例外表は、あなたが書き換えた所だけを書きます（書いていない欄は既定のまま使い、アプリの更新で既定が良くなればそのまま届きます）。"
+                       "数字の表の欄を null にすると「未確定」になり、変換中に使うと指摘します。（参照）の付いたタブは既定値です。").pack(fill="x")
         nb = ttk.Notebook(w)
         nb.pack(fill="both", expand=True, padx=10, pady=8)
         texts = {}
         for key, title, value, editable in (
-                ("number_rules", "書き換えた欄", self.dic.sections.get("number_rules", {}), True),
+                ("number_rules", "数字の表（書き換えた欄）", self.dic.sections.get("number_rules", {}), True),
                 ("number_exceptions", "例外表（A〜E）", self.dic.sections.get("number_exceptions", {}), True),
-                ("default_rules", "既定の表（参照）", core.DEFAULT_NUMBERS, False),
-                ("default_exceptions", "既定の例外（参照）", core.DEFAULT_NUMBER_EXCEPTIONS, False)):
+                ("english_dictionary", "英字読み辞書", self.dic.sections.get("english_dictionary", {}), True),
+                ("unit_dictionary", "単位辞書", self.dic.sections.get("unit_dictionary", {}), True),
+                ("follow_patterns", "後続パターン", self.dic.sections.get("follow_patterns", {}), True),
+                ("default_rules", "数字の表（参照）", core.DEFAULT_NUMBERS, False),
+                ("default_exceptions", "例外表（参照）", core.DEFAULT_NUMBER_EXCEPTIONS, False),
+                ("default_units", "単位辞書（参照）", core.DEFAULT_UNITS, False)):
             frm = ttk.Frame(nb)
             nb.add(frm, text=title)
             t = tk.Text(frm, wrap="none", font=self.f_entry, undo=True)
@@ -2634,15 +2748,18 @@ class App:
             if not self._dict_writable(parent=w):
                 return
             new = {}
-            for key in ("number_rules", "number_exceptions"):
+            for key in self.EDITABLE_TABLES:
                 try:
                     v = json.loads(texts[key].get("1.0", "end-1c") or "{}")
                 except ValueError as ex:
                     messagebox.showerror(APP_NAME, f"「{nb.tab(list(texts).index(key), 'text')}」の書き方が正しくありません。\n{ex}", parent=w)
                     return
                 if not isinstance(v, dict) or (key == "number_exceptions" and
-                                               any(not isinstance(x, list) for x in v.values())):
-                    messagebox.showerror(APP_NAME, "{ } で囲んだ形で書いてください（例外表は、種類ごとに [ ] の一覧）。", parent=w)
+                                               any(not isinstance(x, list) for x in v.values())) or \
+                        (key != "number_exceptions" and key != "number_rules" and
+                         any(not isinstance(x, dict) for x in v.values())):
+                    messagebox.showerror(APP_NAME, f"「{nb.tab(list(texts).index(key), 'text')}」は {{ }} で囲んだ形で書いてください"
+                                                   "（例外表は種類ごとに [ ] の一覧、英字・単位・後続パターンは1つずつ { } で）。", parent=w)
                     return
                 new[key] = v
             try:
@@ -2656,7 +2773,7 @@ class App:
             self.save_dict()
             self.numbers = self.dic.number_table()
             w.destroy()
-            self._refresh_status("数字の読み表を保存しました。次の［変換］から使います。")
+            self._refresh_status("表を保存しました。次の［変換］から使います。")
 
         bf = ttk.Frame(w, padding=(10, 0, 10, 10))
         bf.pack(fill="x")
@@ -2849,6 +2966,53 @@ class App:
             self._refresh_voice_list()
             self._save_conf()
             self._refresh_status("AquesTalkPlayer の場所を保存しました")
+
+
+class FormDialog:
+    """1行の入力欄を並べた、小さな入力ダイアログ。fields: [(キー, 見出し, 初期値, 説明)]。result: {キー: 入力} か None"""
+
+    def __init__(self, root, app: App, title, fields, required=()):
+        self.result = None
+        w = tk.Toplevel(root)
+        w.title(title)
+        w.transient(root)
+        w.resizable(True, False)
+        w.columnconfigure(1, weight=1)
+        pad = {"padx": 8, "pady": 4}
+        self.vars = {}
+        first = None
+        for row, (key, label, value, hint) in enumerate(fields):
+            ttk.Label(w, text=label).grid(row=row * 2, column=0, sticky="w", **pad)
+            v = tk.StringVar(value=value)
+            ent = ttk.Entry(w, textvariable=v, font=app.f_entry, width=36)
+            ent.grid(row=row * 2, column=1, sticky="ew", **pad)
+            if first is None and not value:
+                first = ent
+            if hint:
+                ttk.Label(w, text=hint, foreground="#666", wraplength=app._sc(420), justify="left").grid(
+                    row=row * 2 + 1, column=1, sticky="w", padx=8)
+            self.vars[key] = v
+        self.msg = tk.StringVar()
+        ttk.Label(w, textvariable=self.msg, foreground="#a05a00").grid(row=len(fields) * 2, column=0, columnspan=2,
+                                                                        sticky="w", **pad)
+        bf = ttk.Frame(w)
+        bf.grid(row=len(fields) * 2 + 1, column=0, columnspan=2, sticky="e", **pad)
+
+        def ok():
+            r = {k: v.get().strip() for k, v in self.vars.items()}
+            if any(not r[k] for k in required):
+                self.msg.set("⚠ 入っていない欄があります")
+                return
+            self.result = r
+            w.destroy()
+
+        ttk.Button(bf, text="OK", command=ok).pack(side="left", padx=4)
+        ttk.Button(bf, text="キャンセル", command=w.destroy).pack(side="left")
+        w.bind("<Return>", lambda e: ok())
+        w.bind("<Escape>", lambda e: w.destroy())
+        (first or ent).focus_set()
+        w.grab_set()
+        root.wait_window(w)
 
 
 class EntryDialog:
