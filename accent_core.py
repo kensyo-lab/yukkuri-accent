@@ -4,6 +4,7 @@
 流れ:
     YMM4の初期出力
       → normalize()        記号の半角/全角そろえ・空白除去・仮名の整理
+      → resolve_units()    <NUMK>/ の直後の読みを単位に解決（単位辞書）。指摘も集める
       → expand_numbers()   <NUMK ...> タグを仮名に展開（numbers.json の表に従う）
       → Dictionary.apply() 辞書で置き換え（最長一致・1パス）
       → validate()         AquesTalk記号列としての検査
@@ -504,7 +505,7 @@ def expand_numbers(s: str, t: dict, mark: bool = False) -> str:
             continue
         pre = s[pos:m.start()]
         attrs = {k.upper(): v for k, v in ATTR_RE.findall(m.group(1))}
-        counter = attrs.get("COUNTER", "")
+        counter = attrs.get("COUNTER", "") or (UNIT_PREFIX + attrs["UNIT"] if attrs.get("UNIT") else "")
         reading = read_number(attrs.get("VAL", ""), counter, t)
         if reading is None:
             out.append(pre + m.group(0))
@@ -545,6 +546,147 @@ def expand_numbers(s: str, t: dict, mark: bool = False) -> str:
         prev_counter = counter
     out.append(s[pos:])
     return "".join(out)
+
+
+# ─────────────────────────────────────────────
+# 2.5) 単位の解決と、人が確かめる所の指摘
+# ─────────────────────────────────────────────
+# YMM4 は、知っている単位（km など）を COUNTER= にして助数詞として渡す。知らない単位は
+# <NUMK VAL=n>/えぶ のように、数字との間に / を入れて「読み」で渡してくる。
+# ここではその読みを単位辞書で単位IDに解決し、タグに UNIT= を足して、助数詞と同じ形に揃える
+# （/ を詰め、数字と一つの句にする）。単位の後に続く文字（だった・で_ス など）はそのまま残す。
+@dataclass
+class Finding:
+    """人が確かめる所。変換結果は変えず、下のチェック結果に並べる"""
+    stage: str           # どの段で見つけたか（正規化 / 英字 / 単位 …）
+    kind: str            # unit_unknown / n_head / dot_number …
+    text: str            # 該当する読み
+    msg: str
+    action: str = ""     # できる操作（読みを登録 / 単位を登録 / 目視確認 …）
+    level: str = "warn"
+
+
+@dataclass
+class UnitHit:
+    """単位に解決した所（どの読みを、どの単位に、どの表の項目で決めたか）"""
+    reading: str
+    unit_id: str
+    origin: str          # "既定" / "辞書"
+
+
+UNIT_PREFIX = "unit:"    # 数字の表の counters に足すときの名前（unit:kelvin）
+
+# 既定の単位。読みとアクセントが決まったものだけを置く（決まっていない単位は「未登録」として指摘する）
+#   reading      : 単位の読み＋アクセント
+#   ymm4_readings: YMM4 が出す読み（大文字・小文字で読みが分かれるものは、両方を書く）
+DEFAULT_UNITS = {
+    "electron_volt": {"reading": "でんしぼ'ると", "ymm4_readings": ["えぶ"], "source": "eV"},
+    "kelvin": {"reading": "け'るびん", "ymm4_readings": ["けー"], "source": "K"},
+    "astronomical_unit": {"reading": "えーゆ'ー", "ymm4_readings": ["えーゆー", "おー"], "source": "AU / au"},
+}
+
+# 単位の後ろに続いてよい語（単位の読みの後ろがこれだけなら単位とみなす。「おーきな」の「おー」などを誤って単位にしない）
+UNIT_TAILS = sorted({"について", "から", "まで", "より", "には", "では", "とは", "へは",
+                     "わ", "が", "を", "に", "の", "で", "と", "も", "へ", "や",
+                     "だった", "でした", "で_ス", "です", "だ", "でわ", "くらい", "ぐらい", "ほど", "いじょう",
+                     "いか", "いない", "みまん", "ずつ", "しか", "だけ", "など"}, key=len, reverse=True)
+UNIT_FIND_MAX = 3        # これ以下の文字数の未登録の読みを「単位らしき」とみなす（「おーきな」などを拾わない）
+
+
+def unit_table(user: dict | None = None) -> dict:
+    """既定の単位に、辞書の unit_dictionary（単位ID → 項目）を重ねる。同じ単位IDは辞書の方が勝つ"""
+    table = {uid: dict(e, origin="既定") for uid, e in DEFAULT_UNITS.items()}
+    for uid, e in (user or {}).items():
+        if isinstance(e, dict) and isinstance(e.get("reading"), str) and e["reading"]:
+            table[uid] = dict(e, origin="辞書")
+    return table
+
+
+def with_units(t: dict, units: dict) -> dict:
+    """数字の表に、単位を助数詞（unit:単位ID、アクセントは単位側）として足した表"""
+    t2 = dict(t)
+    t2["counters"] = dict(t.get("counters", {}))
+    for uid, e in units.items():
+        t2["counters"][UNIT_PREFIX + uid] = {"reading": normalize(e["reading"]), "mode": "own"}
+    return t2
+
+
+def _is_tail(s: str) -> bool:
+    """s が空か、UNIT_TAILS をつなげたものか"""
+    ok = [False] * (len(s) + 1)
+    ok[len(s)] = True
+    for i in range(len(s) - 1, -1, -1):
+        ok[i] = any(s.startswith(t, i) and ok[i + len(t)] for t in UNIT_TAILS)
+    return ok[0]
+
+
+def _strip_tail(s: str) -> str:
+    """後ろの UNIT_TAILS を外した残り（できるだけ短く。全部外れるなら空）"""
+    for c in range(1, len(s) + 1):
+        if _is_tail(s[c:]):
+            return s[:c]
+    return ""
+
+
+def resolve_units(s: str, units: dict, numbers: dict | None = None) -> tuple[str, list[UnitHit], list[Finding]]:
+    """<NUMK VAL=n>/読み の「読み」を単位に解決する。数字の直後（/ の後）だけを見るので、ふつうの文の読みは変えない。
+    numbers の suffix_fixes が当たる所（「/くむ」など）は、今まで通りそちらに任せる"""
+    index = sorted(((normalize(r), uid) for uid, e in units.items() for r in e.get("ymm4_readings", [])),
+                   key=lambda x: -len(x[0]))
+    fixes = tuple((numbers or {}).get("suffix_fixes", {}))
+    out, hits, found, pos = [], [], [], 0
+    for m in NUMK_RE.finditer(s):
+        attrs = {k.upper(): v for k, v in ATTR_RE.findall(m.group(1))}
+        end = m.end()
+        if attrs.get("COUNTER") or attrs.get("UNIT") or not s.startswith("/", end) or (fixes and s.startswith(fixes, end)):
+            continue
+        j = k = end + 1
+        while k < len(s) and s[k] not in BOUNDARY and s[k] != "<":
+            k += 1
+        phrase = s[j:k]
+        hit = next(((r, uid) for r, uid in index if phrase.startswith(r) and _is_tail(phrase[len(r):])), None)
+        if hit:
+            r, uid = hit
+            out.append(s[pos:m.start()] + m.group(0)[:-1] + f" UNIT={uid}>")
+            pos = j + len(r)
+            hits.append(UnitHit(r, uid, units[uid].get("origin", "")))
+            continue
+        stem = _strip_tail(phrase)
+        if stem and stem[0] not in "んン" and len(ctx_plain(stem)) <= UNIT_FIND_MAX:
+            found.append(Finding("単位", "unit_unknown", stem, f"単位らしき未登録の読み：{stem}（数字の直後）", "単位を登録"))
+    out.append(s[pos:])
+    return "".join(out), hits, found
+
+
+DOT_NUMBER_RE = re.compile(r"<NUMK\b([^<>]*)>\.(?:<NUMK\b([^<>]*)>|(\d+))", re.IGNORECASE)
+
+
+def number_findings(s: str) -> list[Finding]:
+    """数字の後に「.数字」が続く所（802.11n などの規格名・版番号の可能性。YMM4 は小数として読まない）"""
+    out = []
+    for m in DOT_NUMBER_RE.finditer(s):
+        a = dict((k.upper(), v) for k, v in ATTR_RE.findall(m.group(1))).get("VAL", "")
+        b = dict((k.upper(), v) for k, v in ATTR_RE.findall(m.group(2) or "")).get("VAL", m.group(3) or "")
+        text = f"{a}.{b}"
+        out.append(Finding("正規化", "dot_number", text,
+                           f"数字の後に「.数字」があります：{text}（規格名・版番号の可能性。読みを確かめてください）", "目視確認"))
+    return out
+
+
+def english_findings(s: str) -> list[Finding]:
+    """英字の読み間違いらしき所。文節の頭の「ん」は、日本語にはまず無いので、英字由来とみなす（802.11n の n など）"""
+    out = []
+    tags = [(m.start(), m.end()) for m in TAG_RE.finditer(s)]
+    for i, c in enumerate(s):
+        if c not in "んン" or any(a <= i < b for a, b in tags):
+            continue
+        if i == 0 or s[i - 1] in BOUNDARY or s[i - 1] == ">":
+            k = i
+            while k < len(s) and s[k] not in BOUNDARY and s[k] != "<":
+                k += 1
+            out.append(Finding("英字", "n_head", s[i:k], f"文節の頭に「ん」があります：{s[i:k]}（英字の読み間違いの可能性）",
+                               "読みを登録"))
+    return out
 
 
 # ─────────────────────────────────────────────
@@ -814,6 +956,10 @@ class Dictionary:
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp, path)
+
+    def unit_table(self) -> dict:
+        """既定の単位に、この辞書の単位辞書（unit_dictionary）を重ねた表"""
+        return unit_table(self.sections.get("unit_dictionary"))
 
     # 編集 -----------------------------------------------------------
     def find(self, src: str, before: str = "", after: str = "") -> Entry | None:
@@ -1273,17 +1419,36 @@ class Result:
     text: str
     applied: list[Applied] = field(default_factory=list)
     issues: list[Issue] = field(default_factory=list)
+    findings: list["Finding"] = field(default_factory=list)   # 人が確かめる所（変換はしない）
+    units: list["UnitHit"] = field(default_factory=list)      # 単位に解決した所と、決め手になった項目
 
 
-def prepare(raw: str, numbers: dict) -> str:
-    """辞書を当てる直前の形（正規化＋数字展開）。学習でも同じものを使う。"""
-    return expand_numbers(normalize(raw), numbers)
+@dataclass
+class Prepared:
+    text: str
+    findings: list["Finding"]
+    units: list["UnitHit"]
+
+
+def preprocess(raw: str, numbers: dict, units: dict | None = None) -> Prepared:
+    """辞書を当てる直前の形と、各段の指摘。units は unit_table() の表（省略すると既定の単位だけ）"""
+    units = unit_table() if units is None else units
+    s = normalize(raw)
+    findings = number_findings(s)
+    s, hits, unit_found = resolve_units(s, units, numbers)
+    findings += english_findings(s) + unit_found
+    return Prepared(expand_numbers(s, with_units(numbers, units)), findings, hits)
+
+
+def prepare(raw: str, numbers: dict, units: dict | None = None) -> str:
+    """辞書を当てる直前の形（正規化＋単位の解決＋数字展開）。学習でも同じものを使う。"""
+    return preprocess(raw, numbers, units).text
 
 
 def convert(raw: str, dic: Dictionary, numbers: dict) -> Result:
-    s = prepare(raw, numbers)
-    s, applied = dic.apply(s)
-    return Result(s, applied, validate(s))
+    pre = preprocess(raw, numbers, dic.unit_table())
+    s, applied = dic.apply(pre.text)
+    return Result(s, applied, validate(s), pre.findings, pre.units)
 
 
 # ─────────────────────────────────────────────
@@ -1335,7 +1500,9 @@ def _skel_len(s: str) -> int:
 
 
 def learn(before_raw: str, after_raw: str, numbers: dict, dic: Dictionary | None = None) -> list[Candidate]:
-    b_all = expand_numbers(normalize(before_raw), numbers, mark=True).split("\n")
+    units = dic.unit_table() if dic else unit_table()
+    b_units = resolve_units(normalize(before_raw), units, numbers)[0]
+    b_all = expand_numbers(b_units, with_units(numbers, units), mark=True).split("\n")
     a_all = normalize(after_raw).split("\n")
     cands: list[Candidate] = []
     for bm, a in zip(b_all, a_all):

@@ -748,6 +748,7 @@ class App:
         self.issue_list.pack(fill="x")
         self.issue_list.bind("<<ListboxSelect>>", self._on_issue_click)
         self._issues: list[core.Issue] = []
+        self._findings: list[core.Finding] = []   # 最後の変換で見つけた「人が確かめる所」（手直ししても残す）
 
     def paste_and_convert(self):
         try:
@@ -764,7 +765,7 @@ class App:
         self.out_text.delete("1.0", "end")
         self.out_text.insert("1.0", res.text)
         self._out_converted = res.text
-        self._out_prepared = core.prepare(raw, self.numbers)
+        self._out_prepared = core.prepare(raw, self.numbers, self.dic.unit_table())
         self._raw_converted = raw
         for tag in self._ap_tags:
             self.out_text.tag_delete(tag)
@@ -776,6 +777,7 @@ class App:
             self.out_text.tag_add("applied", f"1.0+{a.start}c", f"1.0+{a.end}c")
             self.out_text.tag_add(tag, f"1.0+{a.start}c", f"1.0+{a.end}c")
         self._update_insight()
+        self._findings = res.findings
         self._show_issues(res.issues)
         if self.auto_copy.get() and res.text:
             self._copy(res.text)
@@ -787,10 +789,14 @@ class App:
         n_warn = len(res.issues) - n_err
         head = "コピーされていた読みを自動で貼り付けて変換しました" if auto else "変換しました"
         parts = [(f"{head}：辞書で置き換え {len(res.applied)} か所 ／ ", None)] + self._count_parts(n_err, n_warn)
+        if res.findings:
+            parts.append((f" ／ 確認 {len(res.findings)}", "warn"))
         if self.auto_copy.get() and res.text:
             parts.append(("　— コピーしました", None))
         if n_err:
             parts.append(("\n赤い所は YMM4 で正しく読まれません。下のチェック結果を見て直してください", "crit"))
+        elif res.findings:
+            parts.append(("\n人が確かめた方がよい所があります（下のチェック結果の「◇ 確認」）", "warn"))
         elif n_warn:
             parts.append(("\n橙の所を確かめてください（下のチェック結果をクリックすると選択します）", "warn"))
         self._refresh_status(parts)
@@ -816,13 +822,27 @@ class App:
             mark = "✖ エラー" if i.level == "error" else "△ 注意"
             self.issue_list.insert("end", f"{mark}　{i.start + 1}文字目: {i.msg}")
             self.issue_list.itemconfig("end", fg="#b00000" if i.level == "error" else "#a05a00")
-        if not issues:
+        for f in self._findings:
+            self.issue_list.insert("end", f"◇ 確認　［{f.stage}］{f.msg}")   # f.action（登録などの操作）は、操作を作ったら出す
+            self.issue_list.itemconfig("end", fg="#2a5aa0")
+        if not issues and not self._findings:
             self.issue_list.insert("end", "問題は見つかりませんでした。")
             self.issue_list.itemconfig("end", fg="#2a7a2a")
 
     def _on_issue_click(self, _e):
         sel = self.issue_list.curselection()
-        if not sel or sel[0] >= len(self._issues):
+        if not sel:
+            return
+        if sel[0] >= len(self._issues):
+            # 確認の所は、変換結果の中の同じ読みを探して選ぶ（数字の展開などで形が変わっていれば何もしない）
+            k = sel[0] - len(self._issues)
+            if k < len(self._findings):
+                pos = self.out_text.search(self._findings[k].text, "1.0", "end") if self._findings[k].text else ""
+                if pos:
+                    self.out_text.tag_remove("sel", "1.0", "end")
+                    self.out_text.tag_add("sel", pos, f"{pos}+{len(self._findings[k].text)}c")
+                    self.out_text.see(pos)
+                    self.out_text.focus_set()
             return
         i = self._issues[sel[0]]
         self.out_text.tag_remove("sel", "1.0", "end")
