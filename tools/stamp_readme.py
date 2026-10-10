@@ -9,7 +9,7 @@ import sys
 path, tag = sys.argv[1], sys.argv[2]
 with open(path, encoding="utf-8", newline="") as f:
     s = f.read()
-line = (f"**この zip の版：{tag}**（最新版は "
+line = (f"この zip の版：{tag}（最新版は "
         "https://github.com/kensyo-lab/yukkuri-accent/releases/latest で確かめられます）")
 s, n = re.subn(r"^\[!\[最新版\]\(.*$", lambda m: line, s, count=1, flags=re.M)
 if n != 1:
