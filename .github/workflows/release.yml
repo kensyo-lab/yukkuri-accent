@@ -44,23 +44,9 @@ jobs:
       - name: 必要なものを入れる
         run: pip install pyinstaller pillow
 
-      - name: テスト（数字の展開と学習）
+      - name: テスト（tests/ のスクリプトを全部。どれか失敗すると止まる）
         shell: bash
-        run: |
-          python tests/test_samples.py
-          python tests/test_accent_edit.py
-          python tests/test_presets.py
-          python tests/test_pitch_backup.py
-          python tests/test_close_check.py
-          python tests/test_location.py
-          python tests/test_phrase_ops.py
-          python tests/test_context_dict.py
-          python tests/test_context_spec.py
-          python tests/test_volume_autopaste.py
-          python tests/test_insight.py
-          python tests/test_drc_usage.py
-          python tests/test_dict_safety.py
-          python tests/check_numbers.py > /dev/null
+        run: python tests/run_all.py
 
       - name: アイコンを用意する
         shell: bash

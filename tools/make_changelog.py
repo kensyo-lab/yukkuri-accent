@@ -22,7 +22,8 @@ HEAD = """# ゆっくりアクセント辞書 変更履歴
 古い版から一気に上げるときに、何が変わったかを確かめるのにお使いください。
 
 ## 入れ替え方（どの版からでも同じです）
-ユーザーデータの `accent_dict.json`（辞書）・`numbers.json`（数字の読み表）・`settings.json`（設定）・`backup` フォルダ（辞書のバックアップ）はそのまま残し、それ以外の配布ファイル（`yukkuri-accent.exe`・README・FAQ・CHANGELOG・`dictionaries` など）は、新しい版のもので置き換えてください。
+ユーザーデータの `accent_dict.json`（辞書）・`learning.json`（学習候補）・`settings.json`（設定）・`backup` フォルダ（辞書のバックアップ）はそのまま残し、それ以外の配布ファイル（`yukkuri-accent.exe`・README・FAQ・CHANGELOG・`dictionaries` など）は、新しい版のもので置き換えてください。
+v0.9 以前から入れ替えるときは、`numbers.json`（数字の読み表）も残してください。v1.0.0 を初めて起動したときに、辞書の中へ移します。
 心配なときは、置き換える前にフォルダごと別の場所へコピーしておくと安心です。
 """
 
@@ -59,6 +60,8 @@ def body(text: str) -> str:
             skip = line.strip() == "## 入れ替え方"      # 入れ替え方（冒頭に1回だけ書く）
             if skip:
                 continue
+            line = "#" + line
+        elif line.startswith("###") and not skip:       # 小見出しも1段下げる（### → ####）
             line = "#" + line
         elif skip:
             continue

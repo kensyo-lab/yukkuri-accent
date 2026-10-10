@@ -3,7 +3,7 @@
 
 使い方:
     python accent_app.py
-同じフォルダに accent_dict.json（辞書）と numbers.json（数字の読み表）が作られます。
+同じフォルダに accent_dict.json（辞書。数字の読み表と例外表もこの中）が作られます。
 """
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ from tkinter import ttk, messagebox, filedialog
 import accent_core as core
 
 APP_NAME = "ゆっくりアクセント辞書"
-VERSION = "0.9.2"
+VERSION = "1.0.0"
 
 if getattr(sys, "frozen", False):
     BASE_DIR = os.path.dirname(sys.executable)
@@ -32,6 +32,7 @@ else:
 DICT_PATH = os.path.join(BASE_DIR, "accent_dict.json")
 NUM_PATH = os.path.join(BASE_DIR, "numbers.json")
 CONF_PATH = os.path.join(BASE_DIR, "settings.json")
+LEARN_PATH = os.path.join(BASE_DIR, "learning.json")     # 拾った修正（学習候補・修正履歴・計測）。辞書とは別
 # 同梱ファイル（アイコンなど）の場所: .exe では展開先、スクリプトでは同じフォルダ
 RES_DIR = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
 
@@ -155,9 +156,9 @@ class App:
         self.style = ttk.Style(root)
         self._apply_style()
 
-        self._ensure_numbers_file()
-        self.numbers = core.load_numbers(NUM_PATH)
         self.dic, broken = self._load_dict()
+        moved = self._move_numbers_file()
+        self.numbers = self.dic.number_table()
         self.pitch_line = tk.BooleanVar(value=self.conf.get("pitch_line", True))
         self.check_place = tk.BooleanVar(value=self.conf.get("check_location", True))
         self.shortcuts = {k: v for k, v in (self.conf.get("shortcuts") or {}).items()}
@@ -177,6 +178,15 @@ class App:
         self.volume = core.step_volume(int(self.conf.get("volume", 100) or 0), 0)
         self.muted = bool(self.conf.get("muted", False))
         self.auto_watch = tk.BooleanVar(value=self.conf.get("auto_watch", True))
+        # YMM4 で直した読みがコピーされたら拾う（学習候補に溜める）。すべてこのPCの中だけで、どこにも送らない
+        self.capture_on = tk.BooleanVar(value=self.conf.get("capture_corrections", True))
+        self.capture_info = tk.StringVar()
+        self._recent: list[core.OutputLine] = []     # 最近出した行（修正と照合する）
+        try:
+            self.learning = core.LearningStore.load(LEARN_PATH)
+        except Exception:
+            self.learning = core.LearningStore()      # 読めなければ空で始める（元のファイルは上書きしない）
+            self._learn_broken = True
         self._away = False         # ほかのアプリに切り替えている間 True
         self._last_copied = None   # このツールが最後にクリップボードへ入れた物
         self._texts = []
@@ -208,10 +218,15 @@ class App:
             self._refresh_status([("辞書ファイルが壊れていて読み込めませんでした。", "crit"),
                                   (f"\n元のファイルは {os.path.basename(broken)} に名前を変えて残してあります。"
                                    "辞書タブの［バックアップから戻す…］で、前の状態に戻せます。", None)])
-        elif self.dic.newer_format:
+        elif self.dic.read_only:
             self._refresh_status([("この辞書は、もっと新しい版のゆっくりアクセント辞書で作られています。", "warn"),
-                                  ("\nこの版が知らない情報も消さずに残します。念のため、開く前の辞書を backup フォルダの keep に残しました。"
-                                   "できれば新しい版を使ってください", None)])
+                                  ("\n辞書を壊さないよう、読み取り専用で開きました。変換はできますが、辞書への登録・削除・保存はできません。"
+                                   "新しい版を使ってください。", None)])
+        elif moved:
+            self._refresh_status([("数字の読み表（numbers.json）を、辞書の中に移しました。", "warn"),
+                                  ("\n書き換えていた欄だけを移し、元のファイルは "
+                                   f"{os.path.basename(moved)} に名前を変えて残してあります。"
+                                   "これからは辞書タブの［数字の読み表…］で書き換えます。", None)])
         elif place:
             self._refresh_status(place)
         else:
@@ -230,30 +245,24 @@ class App:
         root.protocol("WM_DELETE_WINDOW", self.on_close)
         # ほかのアプリ（YMM4）から戻ってきたら、新しくコピーされた読みを自動で変換する
         self._clip_seen = self._clipboard()
+        self._cap_seen = self._clip_seen              # 起動前からクリップボードにある物は拾わない
+        self._update_capture_info()
+        root.after(1000, self._poll_clipboard)
         root.bind_all("<FocusOut>", lambda e: root.after(80, self._check_away), add="+")
         root.bind_all("<FocusIn>", self._on_focus_in, add="+")
         if self.conf.get("accent_panel"):
             self._open_panel_at_start()
 
     # ── 数字の読み表 ────────────────────────────────
-    def _ensure_numbers_file(self):
-        """numbers.json が無い／古い形式なら、最新の既定値で作り直す（古いものは退避）。"""
-        need = not os.path.exists(NUM_PATH)
-        if not need:
-            try:
-                with open(NUM_PATH, encoding="utf-8") as f:
-                    need = json.load(f).get("version", 1) < core.DEFAULT_NUMBERS["version"]
-            except Exception:
-                need = True
-            if need:
-                bak = os.path.join(BASE_DIR, "numbers_old_backup.json")
-                try:
-                    os.replace(NUM_PATH, bak)
-                except Exception:
-                    pass
-        if need:
-            with open(NUM_PATH, "w", encoding="utf-8") as f:
-                json.dump(core.DEFAULT_NUMBERS, f, ensure_ascii=False, indent=1)
+    def _move_numbers_file(self):
+        """v0.9 までの numbers.json を辞書の中へ移す（初回だけ）。移したら、名前を変えた先を返す"""
+        try:
+            dst = core.move_numbers_into(self.dic, NUM_PATH)
+        except Exception:
+            return None          # 読めない numbers.json は触らない（辞書は既定の表で動く）
+        if dst:
+            self.save_dict()
+        return dst
 
     # ── 設定 ────────────────────────────────────────
     def _load_conf(self):
@@ -277,6 +286,7 @@ class App:
         self.conf["volume"] = self.volume
         self.conf["muted"] = self.muted
         self.conf["auto_watch"] = bool(self.auto_watch.get())
+        self.conf["capture_corrections"] = bool(self.capture_on.get())
         self.conf["phrase_colors"] = bool(self.phrase_colors.get())
         self.conf["counted_lines"] = self._counted_order[-COUNTED_MAX:]
         self.conf["last_version"] = VERSION
@@ -290,8 +300,9 @@ class App:
     def _load_dict(self):
         """辞書を読む。壊れていたら名前を変えて残し、空の辞書で始める（起動できないのを防ぐ）。
         戻り値: (辞書, 壊れていたファイルの退避先 or None)"""
+        self._keep_backups()         # 節目の辞書は、移行する前の状態で残す
         try:
-            dic = core.Dictionary.load(DICT_PATH)
+            dic = core.open_dictionary(DICT_PATH, BACKUP_DIR, VERSION)   # 古い形式なら、移行前の辞書を keep に残して移行する
         except Exception:
             stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
             dst = os.path.join(BASE_DIR, f"accent_dict_broken_{stamp}.json")
@@ -301,14 +312,16 @@ class App:
                 dst = DICT_PATH
             return core.Dictionary(), dst
         self._backup_dict()          # 起動時に1つ写しておく（前回と同じなら写さない）
-        self._keep_backups(dic)
+        if dic.newer_format:
+            try:
+                core.keep_backup(DICT_PATH, BACKUP_DIR, f"newer-{dic.file_version}")
+            except OSError:
+                pass
         return dic, None
 
-    def _keep_backups(self, dic):
-        """節目の辞書を、古い順に消えない所に残す（新しい版を初めて起動する前・月の最初・新しい形式の辞書を開く前）"""
+    def _keep_backups(self):
+        """節目の辞書を、古い順に消えない所に残す（新しい版を初めて起動する前・月の最初）"""
         try:
-            if dic.newer_format:
-                core.keep_backup(DICT_PATH, BACKUP_DIR, f"newer-{dic.file_version}")
             if self.conf.get("last_version") != VERSION:
                 core.keep_backup(DICT_PATH, BACKUP_DIR, f"before-v{VERSION}")
             core.keep_backup(DICT_PATH, BACKUP_DIR, f"month-{datetime.date.today():%Y-%m}")
@@ -474,6 +487,7 @@ class App:
         self.stop_preview()
         self._remove_wav()
         self.save_dict()
+        self._save_learning()
         self._save_conf()
         self.root.destroy()
 
@@ -501,9 +515,19 @@ class App:
                                    else "［この手直しを学習タブへ送る →］から辞書に登録できます", "warn")])
         return ok
 
+    def _dict_writable(self, parent=None) -> bool:
+        """辞書を書き換えてよいか。読み取り専用（新しい版の辞書）なら知らせて False"""
+        if not self.dic.read_only:
+            return True
+        messagebox.showinfo(APP_NAME, "この辞書は、もっと新しい版のゆっくりアクセント辞書で作られているため、読み取り専用で開いています。\n"
+                                      "辞書への登録・削除・保存はできません。新しい版を使ってください。", parent=parent or self.root)
+        return False
+
     def save_dict(self):
+        if self.dic.read_only:
+            return               # 新しい版の辞書は書き換えない（使用回数なども保存しない）
         try:
-            self.dic.save(DICT_PATH)
+            self.dic.save(DICT_PATH, VERSION)
         except Exception as ex:
             messagebox.showerror(APP_NAME, f"辞書を保存できませんでした。\n{ex}")
 
@@ -648,6 +672,16 @@ class App:
                    "・漢字を含む文章や、このツールが自分でコピーした結果には反応しません\n"
                    "・変換結果を手直ししている途中は、手直しを消さないよう、自動では変換しません\n\n"
                    "自分のタイミングで変換したいときは、チェックを外して［貼り付けて変換］を使ってください。").pack(side="left", padx=4)
+        ttk.Checkbutton(mid, text="直した読みを拾う", variable=self.capture_on,
+                        command=self._toggle_capture).pack(side="left", padx=(12, 0))
+        self._help(mid, "直した読みを拾う",
+                   "このツールの変換結果を YMM4 に貼って耳で直し、直した読みをコピーすると、その瞬間に拾って「学習候補」に溜めます。"
+                   "作業の邪魔はしません。溜まった候補は、学習タブの［拾った修正を候補に並べる］で、登録するかどうかを決めます。\n\n"
+                   "・最近このツールが出した行と、記号（' / , _）を外した仮名が同じで、記号の位置だけが違うものだけを拾います\n"
+                   "・出したままの行や、関係のないコピー、読みそのものを直したものは拾いません\n"
+                   "・すべてこのPCの中だけで動き、どこにも送りません（learning.json に残します）\n"
+                   "・オンの間は、横に「● 見張り中」と出ます").pack(side="left", padx=4)
+        ttk.Label(mid, textvariable=self.capture_info, foreground="#2a7a2a").pack(side="left", padx=(4, 0))
         self.btn_acc = ttk.Button(mid, command=self.toggle_accent_panel)
         self.btn_acc.pack(side="right")
         self._build_accent_panel(tab, mid)
@@ -734,7 +768,9 @@ class App:
         self.issue_list = tk.Listbox(tab, height=4, font=self.f_ui, activestyle="none")
         self.issue_list.pack(fill="x")
         self.issue_list.bind("<<ListboxSelect>>", self._on_issue_click)
+        self.issue_list.bind("<Double-Button-1>", self._on_issue_dbl)
         self._issues: list[core.Issue] = []
+        self._findings: list[core.Finding] = []   # 最後の変換で見つけた「人が確かめる所」（手直ししても残す）
 
     def paste_and_convert(self):
         try:
@@ -751,7 +787,7 @@ class App:
         self.out_text.delete("1.0", "end")
         self.out_text.insert("1.0", res.text)
         self._out_converted = res.text
-        self._out_prepared = core.prepare(raw, self.numbers)
+        self._out_prepared = core.prepare(raw, self.numbers, self.dic.unit_table())
         self._raw_converted = raw
         for tag in self._ap_tags:
             self.out_text.tag_delete(tag)
@@ -763,6 +799,10 @@ class App:
             self.out_text.tag_add("applied", f"1.0+{a.start}c", f"1.0+{a.end}c")
             self.out_text.tag_add(tag, f"1.0+{a.start}c", f"1.0+{a.end}c")
         self._update_insight()
+        res.findings += core.history_findings(res.text, self.learning)
+        self._recent = (self._recent + core.output_lines(raw, res))[-core.RECENT_MAX:]
+        self.learning.record_conversion(res)
+        self._findings = res.findings
         self._show_issues(res.issues)
         if self.auto_copy.get() and res.text:
             self._copy(res.text)
@@ -774,10 +814,14 @@ class App:
         n_warn = len(res.issues) - n_err
         head = "コピーされていた読みを自動で貼り付けて変換しました" if auto else "変換しました"
         parts = [(f"{head}：辞書で置き換え {len(res.applied)} か所 ／ ", None)] + self._count_parts(n_err, n_warn)
+        if res.findings:
+            parts.append((f" ／ 確認 {len(res.findings)}", "warn"))
         if self.auto_copy.get() and res.text:
             parts.append(("　— コピーしました", None))
         if n_err:
             parts.append(("\n赤い所は YMM4 で正しく読まれません。下のチェック結果を見て直してください", "crit"))
+        elif res.findings:
+            parts.append(("\n人が確かめた方がよい所があります（下のチェック結果の「◇ 確認」）", "warn"))
         elif n_warn:
             parts.append(("\n橙の所を確かめてください（下のチェック結果をクリックすると選択します）", "warn"))
         self._refresh_status(parts)
@@ -803,19 +847,202 @@ class App:
             mark = "✖ エラー" if i.level == "error" else "△ 注意"
             self.issue_list.insert("end", f"{mark}　{i.start + 1}文字目: {i.msg}")
             self.issue_list.itemconfig("end", fg="#b00000" if i.level == "error" else "#a05a00")
-        if not issues:
+        for f in self._findings:
+            act = f"　（ダブルクリックで{f.action}）" if f.kind in self.FINDING_ACTIONS else ""
+            self.issue_list.insert("end", f"◇ 確認　［{f.stage}］{f.msg}{act}")
+            self.issue_list.itemconfig("end", fg="#2a5aa0")
+        if not issues and not self._findings:
             self.issue_list.insert("end", "問題は見つかりませんでした。")
             self.issue_list.itemconfig("end", fg="#2a7a2a")
 
     def _on_issue_click(self, _e):
         sel = self.issue_list.curselection()
-        if not sel or sel[0] >= len(self._issues):
+        if not sel:
+            return
+        if sel[0] >= len(self._issues):
+            # 確認の所は、変換結果の中の同じ読みを探して選ぶ（数字の展開などで形が変わっていれば何もしない）
+            k = sel[0] - len(self._issues)
+            if k < len(self._findings):
+                pos = self.out_text.search(self._findings[k].text, "1.0", "end") if self._findings[k].text else ""
+                if pos:
+                    self.out_text.tag_remove("sel", "1.0", "end")
+                    self.out_text.tag_add("sel", pos, f"{pos}+{len(self._findings[k].text)}c")
+                    self.out_text.see(pos)
+                    self.out_text.focus_set()
             return
         i = self._issues[sel[0]]
         self.out_text.tag_remove("sel", "1.0", "end")
         self.out_text.tag_add("sel", f"1.0+{i.start}c", f"1.0+{i.end}c")
         self.out_text.see(f"1.0+{i.start}c")
         self.out_text.focus_set()
+
+    # 指摘の種類 → ダブルクリックしたときの操作
+    FINDING_ACTIONS = {"acronym": "_register_english", "n_head": "_register_english",
+                       "unit_unknown": "_register_unit", "accent_conflict": "_choose_candidate",
+                       "corrected_before": "_show_history"}
+
+    def _show_history(self, f):
+        h = f.data.get("history") or {}
+        messagebox.showinfo(APP_NAME, f"{h.get('time', '')} に、YMM4 で次のように直しました。\n\n"
+                                      f"このツールの出力：{h.get('out', '')}\n直した後：{h.get('fixed', '')}\n\n"
+                                      "直した所：" + "、".join(c.get("kind", "") for c in h.get("changes", [])))
+
+    # ── 修正の取り込み ──────────────────────────────
+    def _poll_clipboard(self, once=False):
+        """クリップボードを見張り、最近出した行を記号だけ直した物がコピーされたら、学習候補に拾う"""
+        try:
+            if self.capture_on.get():
+                clip = self._clipboard()
+                if clip and clip != self._cap_seen:
+                    self._cap_seen = clip
+                    caps = core.capture_corrections(clip, self._recent) if clip != self._last_copied else []
+                    if caps:
+                        self.learning.add(caps)
+                        self._save_learning()
+                        self._update_capture_info()
+        finally:
+            if not once:
+                self.root.after(800, self._poll_clipboard)
+
+    def _toggle_capture(self):
+        self._cap_seen = self._clipboard()   # オフの間にコピーされていた物は、オンにしても拾わない
+        self._update_capture_info()
+        self._save_conf()
+
+    def _save_learning(self):
+        if getattr(self, "_learn_broken", False):
+            return               # 読めなかった learning.json は上書きしない
+        try:
+            self.learning.save(LEARN_PATH)
+        except OSError:
+            pass
+
+    def _update_capture_info(self):
+        n = len(self.learning.pending)
+        on = self.capture_on.get()
+        self.capture_info.set(("● 見張り中" if on else "") + (f"（学習候補 {n} 件）" if n else ""))
+        if hasattr(self, "btn_captured"):
+            self.btn_captured.configure(text=f"拾った修正を候補に並べる（{n} 件）")
+
+    def load_captured(self):
+        """拾った修正を、学習タブの候補に並べる（登録するかどうかは、ここで人が決める）"""
+        pend = list(self.learning.pending)
+        if not pend:
+            self._refresh_status("拾った修正はありません。　" + self.learning.summary())
+            return
+        cands = []
+        for rec in pend:
+            cands += core.change_candidates(rec, self.numbers, self.dic)
+        seen = {(c.src, c.dst, c.kind) for c in self.cands}
+        self.cands += [c for c in cands if (c.src, c.dst, c.kind) not in seen]
+        self.learning.pending = []
+        self._save_learning()
+        self._update_capture_info()
+        self._fill_cands()
+        self._refresh_status(f"拾った修正 {len(pend)} 行から、候補 {len(cands)} 件を並べました"
+                             "（例外表の候補は「登録」を外してあります）。\n" + self.learning.summary())
+
+    def _on_issue_dbl(self, _e):
+        sel = self.issue_list.curselection()
+        if not sel or sel[0] < len(self._issues):
+            return "break"
+        k = sel[0] - len(self._issues)
+        if k < len(self._findings) and self._findings[k].kind in self.FINDING_ACTIONS:
+            getattr(self, self.FINDING_ACTIONS[self._findings[k].kind])(self._findings[k])
+        return "break"
+
+    def _register_english(self, f):
+        """英字の読みを英字読み辞書に登録する（YMM4の読み → 正しい読み・アクセント）"""
+        if not self._dict_writable():
+            return
+        r = FormDialog(self.root, self, "英字の読みを登録", [
+            ("ymm4", "YMM4の読み", f.data.get("ymm4_reading", f.text), ""),
+            ("reading", "正しい読み", "", "例：なさ"),
+            ("accent", "アクセント（任意）", "", "例：な'さ　空なら、通常のアクセント辞書に任せます"),
+            ("source", "原文の表記（任意）", "", "例：NASA　メモとして残します")],
+            required=("ymm4", "reading")).result
+        if not r:
+            return
+        if r["accent"] and core.normalize(r["accent"]).replace("'", "").replace("/", "") != core.normalize(r["reading"]).replace("/", ""):
+            if not messagebox.askyesno(APP_NAME, "アクセントの仮名が、正しい読みと違います。このまま登録しますか？"):
+                return
+        kind = self.dic.set_english(r["ymm4"], r["reading"], r["accent"], r["source"])
+        self.save_dict()
+        self._refresh_status(f"英字読み辞書に{'登録' if kind == 'added' else '上書き'}しました："
+                             f"{core.normalize(r['ymm4'])} → {r['accent'] or r['reading']}。もう一度［変換］すると使います。")
+
+    def _register_unit(self, f):
+        """数字の直後の読みを、単位辞書に登録する"""
+        if not self._dict_writable():
+            return
+        known = "、".join(sorted(self.dic.unit_table()))
+        r = FormDialog(self.root, self, "単位を登録", [
+            ("ymm4", "YMM4の読み", f.text, ""),
+            ("unit", "単位ID", "", f"英数字で。今ある単位に読みを足すときは同じIDに（{known}）"),
+            ("reading", "単位の読み＋アクセント", "", "例：ぱ'すかる　今ある単位に足すときは空でも可"),
+            ("source", "原文の表記（任意）", "", "例：Pa")],
+            required=("ymm4", "unit")).result
+        if not r:
+            return
+        if not re.fullmatch(r"[A-Za-z0-9_]+", r["unit"]):
+            messagebox.showerror(APP_NAME, "単位IDは英数字と _ で書いてください（例：pascal）。")
+            return
+        try:
+            kind = self.dic.add_unit_reading(r["unit"], r["ymm4"], r["reading"], r["source"])
+        except ValueError as ex:
+            messagebox.showerror(APP_NAME, f"{ex}\n新しい単位には、読みとアクセントを入れてください。")
+            return
+        self.save_dict()
+        self._refresh_status(f"単位辞書に{'登録' if kind == 'added' else '読みを足し'}ました：{core.normalize(r['ymm4'])} → {r['unit']}。"
+                             "もう一度［変換］すると使います。")
+
+    def _choose_candidate(self, f):
+        """複数のアクセント候補から1つを選び、変換結果に入れる。選んだ形は、前後の条件つきの項目として登録できる"""
+        es = f.data.get("entries", [])
+        if not es:
+            return
+        w = tk.Toplevel(self.root)
+        w.title("候補から選ぶ")
+        w.transient(self.root)
+        ttk.Label(w, padding=10, text=f"「{f.text}」に当たる項目が、同じ優先順位で食い違っています。どれにしますか？").pack(anchor="w")
+        lb = tk.Listbox(w, font=self.f_entry, height=min(8, len(es)), activestyle="none")
+        for e in es:
+            lb.insert("end", f"{e.dst}　（{core.ctx_label(e.before, e.after) or '条件なし'}）")
+        lb.pack(fill="both", expand=True, padx=10)
+        lb.selection_set(0)
+        reg = tk.BooleanVar(value=True)
+        ttk.Checkbutton(w, text="選んだ形を、前後の条件つきで辞書に登録する（次からはこれが優先されます）",
+                        variable=reg).pack(anchor="w", padx=10, pady=6)
+
+        def ok():
+            sel = lb.curselection()
+            if not sel:
+                return
+            e = es[sel[0]]
+            w.destroy()
+            a, b = f.data.get("start", -1), f.data.get("end", -1)
+            cur = self.out_text.get("1.0", "end-1c")
+            if 0 <= a < b <= len(cur) and cur[a:b] == f.text:
+                self.out_text.delete(f"1.0+{a}c", f"1.0+{b}c")
+                self.out_text.insert(f"1.0+{a}c", e.dst)
+            if reg.get() and self._dict_writable():
+                before = next((x.before for x in es if x.before), "")
+                after = next((x.after for x in es if x.after), "")
+                r = EntryDialog(self.root, self, "選んだ形を辞書に登録", f.text, e.dst, e.head_only, e.note,
+                                before, after).result
+                if r:
+                    src, dst, head, note, before, after = r
+                    self.dic.upsert(src, dst, head, note, before, after)
+                    self.save_dict()
+                    self._fill_dict()
+                    self._refresh_status("選んだ形を、前後の条件つきで辞書に登録しました")
+
+        bf = ttk.Frame(w, padding=10)
+        bf.pack(fill="x")
+        ttk.Button(bf, text="OK", command=ok).pack(side="right")
+        ttk.Button(bf, text="キャンセル", command=w.destroy).pack(side="right", padx=6)
+        lb.bind("<Double-Button-1>", lambda e: ok())
+        w.grab_set()
 
     def _copy(self, s):
         self.root.clipboard_clear()
@@ -852,6 +1079,10 @@ class App:
         except tk.TclError:
             return
         clip = self._clipboard()
+        if core.matches_recent(clip, self._recent):     # 変換結果（を YMM4 で直した物）は、新しい読みとして変換しない
+            self._clip_seen = clip
+            self._poll_clipboard(once=True)
+            return
         act = core.auto_convert_action(clip, self._clip_seen, self.in_text.get("1.0", "end-1c"),
                                        self._last_copied, self.out_text.get("1.0", "end-1c"),
                                        self._out_converted)
@@ -1388,6 +1619,8 @@ class App:
 
     def _register_phrase(self, ph):
         """この文節の手直しを、辞書の追加画面に入れて開く（YMM4側＝辞書を当てる前の形、置き換え後＝今の文節）"""
+        if not self._dict_writable():
+            return
         if not self._out_prepared:
             self._refresh_status([("辞書に登録するには、", None), ("先に①に YMM4 の読みを貼って［変換］してください", "warn")])
             return
@@ -1937,6 +2170,8 @@ class App:
         row = ttk.Frame(tab)
         row.pack(fill="x", pady=(2, 6))
         ttk.Button(row, text="差分から候補を出す", style="Big.TButton", command=self.do_learn).pack(side="left")
+        self.btn_captured = ttk.Button(row, text="拾った修正を候補に並べる", command=self.load_captured)
+        self.btn_captured.pack(side="left", padx=(12, 0))
         ttk.Button(row, text="すべてチェック", command=lambda: self._check_all(True)).pack(side="left", padx=(12, 4))
         ttk.Button(row, text="すべて外す", command=lambda: self._check_all(False)).pack(side="left")
         ttk.Button(row, text="チェックしたものを辞書に登録", style="Big.TButton",
@@ -2010,6 +2245,9 @@ class App:
         if not iid or col in ("#1", "#5"):
             return
         c = self.cands[int(iid)]
+        if c.extra:
+            self.edit_numbers()           # 例外表の候補は、表の編集画面で直す
+            return
         r = EntryDialog(self.root, self, "候補を編集", c.src, c.dst, c.head_only, "", c.before, c.after).result
         if r:
             c.src, c.dst, c.head_only, _, c.before, c.after = r
@@ -2017,10 +2255,15 @@ class App:
             self._fill_cands()
 
     def commit_candidates(self):
+        if not self._dict_writable():
+            return
         cnt = {"added": 0, "updated": 0, "same": 0}
         for c in self.cands:
-            if c.use:
+            if c.use and c.extra:
+                cnt[self.dic.add_exception(c.extra["kind"], c.extra["entry"])] += 1
+            elif c.use:
                 cnt[self.dic.upsert(c.src, c.dst, c.head_only, before=c.before, after=c.after)] += 1
+        self.numbers = self.dic.number_table()
         self.save_dict()
         self.cands = [c for c in self.cands if not c.use]
         self._fill_cands()
@@ -2042,8 +2285,7 @@ class App:
                         command=self._fill_dict).pack(side="left", padx=(8, 4))
         self.risky_info = tk.StringVar()
         ttk.Label(top, textvariable=self.risky_info, foreground=MSG_STYLE["warn"]["fg"]).pack(side="left")
-        ttk.Button(top, text="数字の読み表を開く", command=self.open_numbers).pack(side="right")
-        ttk.Button(top, text="読み表を再読み込み", command=self.reload_numbers).pack(side="right", padx=6)
+        ttk.Button(top, text="数字・英字・単位の表…", command=self.edit_numbers).pack(side="right")
 
         cols = ("src", "dst", "ctx", "head", "hits", "added", "warn", "note")
         tv = ttk.Treeview(tab, columns=cols, show="headings", selectmode="extended")
@@ -2390,6 +2632,8 @@ class App:
         self._refresh_status()
 
     def add_entry(self):
+        if not self._dict_writable():
+            return
         r = EntryDialog(self.root, self, "辞書に追加", "", "", False, "").result
         if r:
             src, dst, head, note, before, after = r
@@ -2401,6 +2645,8 @@ class App:
             self._fill_dict()
 
     def edit_entry(self):
+        if not self._dict_writable():
+            return
         sel = self.dict_tv.selection()
         if not sel or sel[0] not in self._row_keys:
             return
@@ -2420,6 +2666,8 @@ class App:
             self._fill_dict()
 
     def delete_entries(self):
+        if not self._dict_writable():
+            return
         sel = self.dict_tv.selection()
         if not sel or not messagebox.askyesno(APP_NAME, f"{len(sel)} 件を削除しますか？"):
             return
@@ -2431,6 +2679,8 @@ class App:
         self._fill_dict()
 
     def import_dict(self):
+        if not self._dict_writable():
+            return
         p = filedialog.askopenfilename(title="取り込む辞書", filetypes=[("辞書ファイル", "*.json")])
         if not p:
             return
@@ -2512,7 +2762,7 @@ class App:
 
         def do_restore():
             sel = lb.curselection()
-            if not sel:
+            if not sel or not self._dict_writable(parent=w):
                 return
             p = files[sel[0]]
             try:
@@ -2526,6 +2776,7 @@ class App:
             self.save_dict()
             self._backup_dict()
             self.dic = d
+            self.numbers = d.number_table()      # 数字の読み表も、戻した辞書のもの
             self.save_dict()
             self._fill_dict()
             w.destroy()
@@ -2552,30 +2803,84 @@ class App:
             messagebox.showerror(APP_NAME, f"開けませんでした。\n{path}\n{ex}")
 
     def export_dict(self):
+        if not self._dict_writable():
+            return
         p = filedialog.asksaveasfilename(title="辞書を書き出す", defaultextension=".json",
                                          initialfile="accent_dict_export.json",
                                          filetypes=[("辞書ファイル", "*.json")])
         if p:
-            self.dic.save(p)
+            self.dic.save(p, VERSION)
 
-    def open_numbers(self):
-        try:
-            if sys.platform.startswith("win"):
-                os.startfile(NUM_PATH)
-            elif sys.platform == "darwin":
-                subprocess.Popen(["open", NUM_PATH])
-            else:
-                subprocess.Popen(["xdg-open", NUM_PATH])
-        except Exception as ex:
-            messagebox.showerror(APP_NAME, f"開けませんでした。\n{NUM_PATH}\n{ex}")
+    EDITABLE_TABLES = ("number_rules", "number_exceptions", "english_dictionary", "unit_dictionary", "follow_patterns")
 
-    def reload_numbers(self):
-        try:
-            self.numbers = core.load_numbers(NUM_PATH)
-            self._refresh_status("数字の読み表を再読み込みしました")
-        except Exception as ex:
-            messagebox.showerror(APP_NAME, f"numbers.json を読めませんでした。\n{ex}")
+    def edit_numbers(self):
+        """数字の読み表（書き換えた欄）と例外表を、JSON のまま書き換える画面。既定の表と既定の例外は参照用に並べる"""
+        w = tk.Toplevel(self.root)
+        w.title("数字・英字・単位の表")
+        w.geometry("900x600")
+        w.transient(self.root)
+        ttk.Label(w, padding=(10, 8, 10, 0), wraplength=860, justify="left",
+                  text="数字の表と例外表は、あなたが書き換えた所だけを書きます（書いていない欄は既定のまま使い、アプリの更新で既定が良くなればそのまま届きます）。"
+                       "数字の表の欄を null にすると「未確定」になり、変換中に使うと指摘します。（参照）の付いたタブは既定値です。").pack(fill="x")
+        nb = ttk.Notebook(w)
+        nb.pack(fill="both", expand=True, padx=10, pady=8)
+        texts = {}
+        for key, title, value, editable in (
+                ("number_rules", "数字の表（書き換えた欄）", self.dic.sections.get("number_rules", {}), True),
+                ("number_exceptions", "例外表（A〜E）", self.dic.sections.get("number_exceptions", {}), True),
+                ("english_dictionary", "英字読み辞書", self.dic.sections.get("english_dictionary", {}), True),
+                ("unit_dictionary", "単位辞書", self.dic.sections.get("unit_dictionary", {}), True),
+                ("follow_patterns", "後続パターン", self.dic.sections.get("follow_patterns", {}), True),
+                ("default_rules", "数字の表（参照）", core.DEFAULT_NUMBERS, False),
+                ("default_exceptions", "例外表（参照）", core.DEFAULT_NUMBER_EXCEPTIONS, False),
+                ("default_units", "単位辞書（参照）", core.DEFAULT_UNITS, False)):
+            frm = ttk.Frame(nb)
+            nb.add(frm, text=title)
+            t = tk.Text(frm, wrap="none", font=self.f_entry, undo=True)
+            sb = ttk.Scrollbar(frm, command=t.yview)
+            t.configure(yscrollcommand=sb.set)
+            sb.pack(side="right", fill="y")
+            t.pack(fill="both", expand=True)
+            t.insert("1.0", json.dumps(value, ensure_ascii=False, indent=1))
+            if not editable or self.dic.read_only:
+                t.configure(state="disabled")
+            texts[key] = t
 
+        def save():
+            if not self._dict_writable(parent=w):
+                return
+            new = {}
+            for key in self.EDITABLE_TABLES:
+                try:
+                    v = json.loads(texts[key].get("1.0", "end-1c") or "{}")
+                except ValueError as ex:
+                    messagebox.showerror(APP_NAME, f"「{nb.tab(list(texts).index(key), 'text')}」の書き方が正しくありません。\n{ex}", parent=w)
+                    return
+                if not isinstance(v, dict) or (key == "number_exceptions" and
+                                               any(not isinstance(x, list) for x in v.values())) or \
+                        (key != "number_exceptions" and key != "number_rules" and
+                         any(not isinstance(x, dict) for x in v.values())):
+                    messagebox.showerror(APP_NAME, f"「{nb.tab(list(texts).index(key), 'text')}」は {{ }} で囲んだ形で書いてください"
+                                                   "（例外表は種類ごとに [ ] の一覧、英字・単位・後続パターンは1つずつ { } で）。", parent=w)
+                    return
+                new[key] = v
+            try:
+                core.merge_numbers(new["number_rules"])
+                core.number_exception_table(new["number_exceptions"])
+            except Exception as ex:
+                messagebox.showerror(APP_NAME, f"この表は使えません。\n{ex}", parent=w)
+                return
+            self._backup_dict()
+            self.dic.sections.update(new)
+            self.save_dict()
+            self.numbers = self.dic.number_table()
+            w.destroy()
+            self._refresh_status("表を保存しました。次の［変換］から使います。")
+
+        bf = ttk.Frame(w, padding=(10, 0, 10, 10))
+        bf.pack(fill="x")
+        ttk.Button(bf, text="保存", command=save).pack(side="right")
+        ttk.Button(bf, text="閉じる", command=w.destroy).pack(side="right", padx=6)
 
     # ── タブ4: 設定 ─────────────────────────────────
     def _build_settings(self, nb):
@@ -2763,6 +3068,53 @@ class App:
             self._refresh_voice_list()
             self._save_conf()
             self._refresh_status("AquesTalkPlayer の場所を保存しました")
+
+
+class FormDialog:
+    """1行の入力欄を並べた、小さな入力ダイアログ。fields: [(キー, 見出し, 初期値, 説明)]。result: {キー: 入力} か None"""
+
+    def __init__(self, root, app: App, title, fields, required=()):
+        self.result = None
+        w = tk.Toplevel(root)
+        w.title(title)
+        w.transient(root)
+        w.resizable(True, False)
+        w.columnconfigure(1, weight=1)
+        pad = {"padx": 8, "pady": 4}
+        self.vars = {}
+        first = None
+        for row, (key, label, value, hint) in enumerate(fields):
+            ttk.Label(w, text=label).grid(row=row * 2, column=0, sticky="w", **pad)
+            v = tk.StringVar(value=value)
+            ent = ttk.Entry(w, textvariable=v, font=app.f_entry, width=36)
+            ent.grid(row=row * 2, column=1, sticky="ew", **pad)
+            if first is None and not value:
+                first = ent
+            if hint:
+                ttk.Label(w, text=hint, foreground="#666", wraplength=app._sc(420), justify="left").grid(
+                    row=row * 2 + 1, column=1, sticky="w", padx=8)
+            self.vars[key] = v
+        self.msg = tk.StringVar()
+        ttk.Label(w, textvariable=self.msg, foreground="#a05a00").grid(row=len(fields) * 2, column=0, columnspan=2,
+                                                                        sticky="w", **pad)
+        bf = ttk.Frame(w)
+        bf.grid(row=len(fields) * 2 + 1, column=0, columnspan=2, sticky="e", **pad)
+
+        def ok():
+            r = {k: v.get().strip() for k, v in self.vars.items()}
+            if any(not r[k] for k in required):
+                self.msg.set("⚠ 入っていない欄があります")
+                return
+            self.result = r
+            w.destroy()
+
+        ttk.Button(bf, text="OK", command=ok).pack(side="left", padx=4)
+        ttk.Button(bf, text="キャンセル", command=w.destroy).pack(side="left")
+        w.bind("<Return>", lambda e: ok())
+        w.bind("<Escape>", lambda e: w.destroy())
+        (first or ent).focus_set()
+        w.grab_set()
+        root.wait_window(w)
 
 
 class EntryDialog:

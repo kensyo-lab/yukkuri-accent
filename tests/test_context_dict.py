@@ -37,16 +37,16 @@ check(conv(d, "はしで/たべる"), "は'しで/たべる")
 check(d.find("はし").dst, "は'し")                       # 条件を省くと、条件なしの項目
 check(d.find("はし", after="を/わたる").dst, "はし'")
 
-# 保存と読み込み（before / after を書く。条件のない辞書は今までと同じ形）
+# 保存と読み込み（before / after を書く。v1.0.0 からは、条件の有無にかかわらず形式 3 で保存する）
 p = os.path.join(tempfile.mkdtemp(), "d.json")
 d.save(p)
 data = json.load(open(p, encoding="utf-8"))
-check(data["version"], 2)
+check(data["version"], 3)
 check(sorted((e["from"], e.get("after", "")) for e in data["entries"]), [("はし", ""), ("はし", "を/わたる")])
 d2 = Dictionary.load(p)
 check(sorted(e.key for e in d2.entries), sorted(e.key for e in d.entries))
 plain = Dictionary(); plain.upsert("あ", "あ'"); plain.save(p)
-check(json.load(open(p, encoding="utf-8"))["version"], 1)
+check(json.load(open(p, encoding="utf-8"))["version"], 3)
 
 # 削除・取り込みも、条件まで含めて項目を見分ける
 d.remove("はし", after="を/わたる"); check([e.key for e in d.entries], [("はし", "", "")])
