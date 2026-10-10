@@ -586,6 +586,8 @@ def expand_numbers(s: str, t: dict, mark: bool = False, units: dict | None = Non
                 pos += len(k)
                 break
         seg = _devoice(seg, t)
+        if log is not None and hit:
+            hit.text = _devoice(reading, t)
         out.append(NUM_OPEN + seg + NUM_CLOSE if mark else seg)
         prev_counter = counter
     out.append(s[pos:])
@@ -763,6 +765,9 @@ class NumberHit:
     reading_by: str       # 例外 A / 例外 B / 例外 C / 規則
     join_by: str = ""     # 例外 E / 既定（単位つきのときだけ）
     entries: list = field(default_factory=list)   # 決め手になった例外の項目
+    text: str = ""        # 出した読み（無声化まで済んだ形。修正の取り込みで、数字の所を探すのに使う）
+    unit_reading: str = ""   # 単位の読み（単位つきのとき）
+    last: str = ""        # つなぎ方の表のキー（数の最後の要素）
 
 
 def _last_token(n: int, frac: str) -> str:
@@ -823,6 +828,7 @@ def number_reading(val: str, counter: str, unit: str, t: dict, units: dict, ex: 
         a = next((e for e in ex.get("unit", []) if _ex_key("unit", e) == (v, unit) and isinstance(e.get("reading"), str)), None)
         if a:
             hit.reading_by, hit.entries = "例外 A", [a]
+            hit.unit_reading, hit.last = normalize(units[unit]["reading"]), _last_token(n, frac)
             return normalize(a["reading"]), hit
 
     b = None if counter else next((e for e in ex.get("number", [])
@@ -849,6 +855,7 @@ def number_reading(val: str, counter: str, unit: str, t: dict, units: dict, ex: 
     # ── 単位とのつなぎ方（E → 既定） ──
     ureading = normalize(units[unit]["reading"])
     last, row = _last_token(n, frac), _unit_row(ureading)
+    hit.unit_reading, hit.last = ureading, last
     cands = [e for e in ex.get("join", []) if str(e.get("last", "")) == last
              and (e.get("unit") == unit or (not e.get("unit") and row and e.get("row") == row))]
     e = max(cands, key=lambda e: 2 if e.get("unit") else 1) if cands else None    # 単位ごとの方が、行のまとめより先
@@ -1301,6 +1308,18 @@ class Dictionary:
     def follow_patterns(self) -> dict:
         v = self.sections.get("follow_patterns")
         return v if isinstance(v, dict) else {}
+
+    def add_exception(self, kind: str, entry: dict) -> str:
+        """例外表に1つ登録する（同じキーの項目は置き換える）"""
+        self._check_writable()
+        if kind not in EXCEPTION_KINDS:
+            raise ValueError(f"例外表の種類 {kind} はありません。")
+        sec = self.sections.setdefault("number_exceptions", {})
+        items = sec.setdefault(kind, [])
+        key = _ex_key(kind, entry)
+        old = [x for x in items if isinstance(x, dict) and _ex_key(kind, x) == key]
+        sec[kind] = [x for x in items if x not in old] + [dict(entry)]
+        return "updated" if old else "added"
 
     def set_english(self, ymm4_reading: str, reading: str, accent: str = "", source: str = "") -> str:
         """英字読み辞書に登録する（同じ YMM4 の読みは上書き。項目の知らない情報は残す）"""
@@ -1900,6 +1919,7 @@ class Candidate:
     use: bool = True
     before: str = ""     # 前後の条件（候補を編集して付けたとき）
     after: str = ""
+    extra: dict = field(default_factory=dict)   # 例外表の候補なら {"kind": unit/number/join, "entry": 項目}
 
 
 def _tokenize(s: str, with_pos: bool = False):
@@ -2057,6 +2077,265 @@ def _strip_particle(b: str, a: str) -> tuple[str, str]:
         if b.endswith(p) and a.endswith(p) and _skel_len(a) - len(p) >= 2:
             return b[:-len(p)], a[:-len(p)]
     return b, a
+
+
+# ─────────────────────────────────────────────
+# 5.5) 修正の取り込み: YMM4 で耳で直した文字列を、コピーされた瞬間に拾う
+# ─────────────────────────────────────────────
+# 照合は「素のかな」（' / , + ; _ と空白を外し、カタカナをひらがなに）で行う。最近出した行と素のかなが同じで、
+# 記号の位置だけが違えば、修正として記録する。読みそのものを直したもの・無関係なコピーは拾わない。
+# 拾ったものは割り込まずに「学習候補」として溜め、登録するかどうかは人が決める。
+LEARN_FORMAT = "yukkuri-accent-learning"
+RECENT_MAX = 50          # 照合に使う「最近出した行」の数
+HISTORY_MAX = 2000       # 修正履歴として残す数
+
+
+def plain_kana(s: str) -> str:
+    return "".join(to_hira(c) for c in normalize(s).strip() if c not in CTX_IGNORE)
+
+
+@dataclass
+class OutputLine:
+    """このツールが最近出した1行（修正と照合するため）"""
+    raw: str             # YMM4 の読み（変換前）
+    out: str             # 変換結果
+    flagged: bool        # 変換したとき、この行に指摘・注意があったか（無ければ、直された所は「見逃し」）
+    numbers: list = field(default_factory=list)   # [(読み, 単位ID, 単位の読み, 値, last)]（この行の数字）
+
+
+def output_lines(raw: str, res: "Result") -> list[OutputLine]:
+    """変換結果を1行ずつに分けて、照合用に残す形にする"""
+    raws, outs = normalize(raw).split("\n"), res.text.split("\n")
+    starts, pos = [], 0
+    for o in outs:
+        starts.append(pos)
+        pos += len(o) + 1
+    hits, cur = [], 0
+    for h in res.numbers:                       # 数字の読みを、出力の中で前から順に探す
+        k = res.text.find(h.text, cur) if h.text else -1
+        if k >= 0:
+            hits.append((k, h))
+            cur = k + len(h.text)
+    lines = []
+    for i, o in enumerate(outs):
+        a, b = starts[i], starts[i] + len(o)
+        r = raws[i] if i < len(raws) else ""
+        flagged = any(a <= x.start < b for x in res.issues) or \
+            any(f.text and (f.text in r or f.text in o) for f in res.findings)
+        nums = [(h.text, h.unit, h.unit_reading, h.value, h.last) for k, h in hits if a <= k < b]
+        lines.append(OutputLine(r, o, flagged, nums))
+    return [x for x in lines if x.out.strip()]
+
+
+@dataclass
+class Change:
+    kind: str            # 単語辞書 / 文脈辞書 / 例外表 E / 例外表 C / 例外表 A
+    out: str             # 直す前の文節（このツールの出力）
+    fixed: str           # 直した後
+    data: dict = field(default_factory=dict)   # 例外表に登録するときの項目の案
+
+
+def _marks_of(gap: str) -> tuple[bool, str]:
+    return ACCENT in gap, "".join(c for c in gap if c in SEPS)
+
+
+def classify_correction(out: str, fixed: str, numbers: list | None = None) -> list[Change]:
+    """出力と、記号だけを直した物を比べて、直した所ごとに保存先を提案する。
+    数字の所: 単位とのつなぎ目 → 例外表 E、一つの句の中のアクセントだけ → 例外表 C、それ以外 → 例外表 A。
+    それ以外: 句の切り方が変わった → 文脈辞書、アクセントの位置だけ → 単語辞書"""
+    oc, og, opos = _tokenize(out, with_pos=True)
+    fc, fg = _tokenize(fixed)
+    if [plain_kana(c) for c in oc] != [plain_kana(c) for c in fc]:
+        return []
+    # 数字の所（文字の番号の範囲）と、単位とのつなぎ目
+    spans = []
+    cur = 0
+    for text, unit, ureading, value, last in numbers or []:
+        k = out.find(text, cur)
+        if k < 0:
+            continue
+        cur = k + len(text)
+        a = next((i for i, p in enumerate(opos) if p >= k), len(oc))
+        b = next((i for i, p in enumerate(opos) if p >= k + len(text)), len(oc))
+        join = b - _skel_len(ureading) if unit and ureading else -1
+        spans.append((a, b, join, unit, value, last, text))
+    # 直した所（文字の前の記号 k、または文字そのものの無声化）
+    diffs = [k for k in range(len(oc) + 1) if og[k] != fg[k]]
+    diffs += [k for k in range(len(oc)) if oc[k] != fc[k] and k not in diffs]
+    if not diffs:
+        return []
+    # 出力の句（区切り記号で分けた、文字の番号の範囲）
+    cuts = sorted({0, len(oc)} | {k for k in range(1, len(oc)) if _has_sep(og[k]) or _has_sep(fg[k])} |
+                  {j for k, c in enumerate(oc) if c in PUNCT or c == "\n" for j in (k, k + 1)})
+    phrases = [(p, q) for p, q in zip(cuts, cuts[1:]) if not (q - p == 1 and oc[p] in PUNCT)]
+
+    def text_of(chars, gaps, a, b):
+        return "".join((gaps[k] if k > a else "") + chars[k] for k in range(a, b)) + \
+            (gaps[b] if b < len(gaps) and ACCENT in gaps[b] else "")
+
+    out_changes: list[Change] = []
+    done = set()
+    for k in sorted(diffs):
+        sp = next((x for x in spans if x[0] < k < x[1] or (k == x[0] < len(oc) and oc[k] != fc[k])), None)
+        if sp:
+            a, b, join, unit, value, last, text = sp
+            if ("num", a) in done:
+                continue
+            done.add(("num", a))
+            ks = [x for x in diffs if a < x < b or (x == a and oc[x] != fc[x])]
+            fixed_num = text_of(fc, fg, a, b)
+            if unit and set(ks) == {join} and _marks_of(og[join])[1] != _marks_of(fg[join])[1] and \
+                    _marks_of(og[join])[0] == _marks_of(fg[join])[0]:
+                out_changes.append(Change("例外表 E", text, fixed_num,
+                                          {"unit": unit, "last": last, "join": _marks_of(fg[join])[1]}))
+            elif all(not _has_sep(og[x]) and not _has_sep(fg[x]) for x in ks) and \
+                    len({next(i for i, (p, q) in enumerate(phrases) if p <= x <= q) for x in ks}) == 1:
+                out_changes.append(Change("例外表 C", text, fixed_num,
+                                          {"value": value, "unit": unit, "reading": fixed_num}))
+            else:
+                out_changes.append(Change("例外表 A", text, fixed_num,
+                                          {"value": value, "unit": unit, "reading": fixed_num}))
+            continue
+        i = next((i for i, (p, q) in enumerate(phrases) if p <= k < q), len(phrases) - 1)
+        p, q = phrases[i]
+        if 0 < k == p:           # 句の頭の区切りが変わった → 前の句とまとめて見る
+            p = phrases[i - 1][0]
+        if ("ph", p) in done:
+            continue
+        done.add(("ph", p))
+        ks = [x for x in diffs if p <= x <= q]
+        cut = any(_marks_of(og[x])[1] != _marks_of(fg[x])[1] for x in ks if x < len(og))
+        out_changes.append(Change("文脈辞書" if cut else "単語辞書", text_of(oc, og, p, q), text_of(fc, fg, p, q)))
+    return out_changes
+
+
+@dataclass
+class Capture:
+    line: OutputLine
+    fixed: str
+    changes: list[Change]
+
+
+def capture_corrections(clip: str, recent: list[OutputLine]) -> list[Capture]:
+    """コピーされた文字列を、最近出した行と照合する。記号だけが違う行を修正として返す（同じ行・無関係な行は返さない）"""
+    out = []
+    for line in normalize(clip or "").split("\n"):
+        t = line.strip()
+        if not t:
+            continue
+        pk = plain_kana(t)
+        r = next((x for x in reversed(recent) if plain_kana(x.out) == pk), None)
+        if r is None or t == r.out.strip():
+            continue
+        ch = classify_correction(r.out.strip(), t, r.numbers)
+        if ch:
+            out.append(Capture(r, t, ch))
+    return out
+
+
+def matches_recent(clip: str, recent: list[OutputLine]) -> bool:
+    """コピーされた物が、最近出した行（を直した物）か。自動で貼り付けて変換しないために使う"""
+    lines = [plain_kana(x) for x in normalize(clip or "").split("\n") if x.strip()]
+    outs = {plain_kana(x.out) for x in recent}
+    return bool(lines) and all(x in outs for x in lines)
+
+
+class LearningStore:
+    """学習候補・修正履歴・計測（辞書とは別のファイル。辞書の形式を身軽に保つため）"""
+
+    def __init__(self):
+        self.pending: list[dict] = []    # まだ人が決めていない修正
+        self.history: list[dict] = []    # 拾った修正のすべて（「過去に手動修正された」の指摘に使う）
+        self.stats = {"conversions": 0, "phrases": 0, "flagged": 0, "corrected": 0, "misses": 0}
+        self.extra: dict = {}
+
+    @classmethod
+    def load(cls, path: str) -> "LearningStore":
+        st = cls()
+        if os.path.exists(path):
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                st.pending = [x for x in data.get("pending", []) if isinstance(x, dict)]
+                st.history = [x for x in data.get("history", []) if isinstance(x, dict)]
+                st.stats.update({k: v for k, v in (data.get("stats") or {}).items() if isinstance(v, int)})
+                st.extra = {k: v for k, v in data.items() if k not in ("format", "version", "pending", "history", "stats")}
+        return st
+
+    def save(self, path: str):
+        data = {"format": LEARN_FORMAT, "version": 1, "pending": self.pending,
+                "history": self.history[-HISTORY_MAX:], "stats": self.stats, **self.extra}
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=1)
+        os.replace(tmp, path)
+
+    def record_conversion(self, res: "Result"):
+        """確認文節数の計測（変換した文節の数と、指摘・注意の数）"""
+        self.stats["conversions"] += 1
+        self.stats["phrases"] += sum(isinstance(x, Phrase) for x in split_phrases(res.text))
+        self.stats["flagged"] += len(res.findings) + len(res.issues)
+
+    def add(self, caps: list[Capture], now: _dt.datetime | None = None) -> int:
+        """拾った修正を学習候補と履歴に足す。指摘の無かった行で直された所は「見逃し」に数える"""
+        stamp = (now or _dt.datetime.now()).isoformat(timespec="seconds")
+        for c in caps:
+            rec = {"time": stamp, "raw": c.line.raw, "out": c.line.out, "fixed": c.fixed, "flagged": c.line.flagged,
+                   "changes": [asdict(x) for x in c.changes]}
+            self.pending.append(rec)
+            self.history.append(rec)
+            self.stats["corrected"] += len(c.changes)
+            if not c.line.flagged:
+                self.stats["misses"] += len(c.changes)
+        return len(caps)
+
+    def corrected_before(self, out: str) -> dict | None:
+        """この行は、前に手で直されたことがあるか（いちばん新しい履歴）"""
+        t = normalize(out).strip()
+        return next((h for h in reversed(self.history) if h.get("out", "").strip() == t), None)
+
+    def summary(self) -> str:
+        s = self.stats
+        return (f"変換 {s['conversions']} 回／文節 {s['phrases']}・確認 {s['flagged']}・"
+                f"手で直した所 {s['corrected']}（うち見逃し {s['misses']}）")
+
+
+def history_findings(text: str, store: LearningStore) -> list[Finding]:
+    """前に手で直された行を指摘する（今回も同じ所を直すことになりそうなので）"""
+    out = []
+    for line in text.split("\n"):
+        h = store.corrected_before(line) if line.strip() else None
+        if h:
+            out.append(Finding("辞書", "corrected_before", line.strip(),
+                               f"前に手で直した行です：{h.get('fixed', '')}（{h.get('time', '')[:10]}）", "履歴を見る",
+                               data={"history": h}))
+    return out
+
+
+def change_candidates(rec: dict, numbers: dict, dic: "Dictionary") -> list["Candidate"]:
+    """学習候補（拾った修正）を、学習タブの候補にする。単語辞書・文脈辞書は辞書の項目（YMM4側 → 直した後）、
+    例外表は例外の項目の案（例外表 C は、どの位の欄かまでは決めず、この数だけに効く A／B として出す）"""
+    kinds = {c.get("kind") for c in rec.get("changes", [])}
+    out: list[Candidate] = []
+    if kinds & {"単語辞書", "文脈辞書"}:
+        for c in learn(rec.get("raw", ""), rec.get("fixed", ""), numbers, dic):
+            if c.kind != "数字":
+                out.append(c)
+    for ch in rec.get("changes", []):
+        k, d = ch.get("kind"), ch.get("data") or {}
+        if k == "例外表 E":
+            out.append(Candidate(f"数字＋{d['unit']}（数の最後が {d['last']}）", f"つなぎ方「{d['join'] or '連結'}」",
+                                 "例外E", False, use=False, extra={"kind": "join", "entry": {
+                                     "unit": d["unit"], "last": d["last"], "join": d["join"]}}))
+        elif k in ("例外表 C", "例外表 A") and d.get("value"):
+            kind = "unit" if d.get("unit") else "number"
+            label = ("例外A" if kind == "unit" else "例外B") + ("（Cの候補）" if k == "例外表 C" else "")
+            entry = {"value": d["value"], "reading": d["reading"], **({"unit": d["unit"]} if d.get("unit") else {})}
+            if k == "例外表 C":
+                entry["note"] = "位の読み（C）の候補。この数だけに効く形で登録"
+            out.append(Candidate(f"{d['value']}" + (f"＋{d['unit']}" if d.get("unit") else ""), d["reading"],
+                                 label, False, use=False, extra={"kind": kind, "entry": entry}))
+    return out
 
 
 # ─────────────────────────────────────────────

@@ -32,6 +32,7 @@ else:
 DICT_PATH = os.path.join(BASE_DIR, "accent_dict.json")
 NUM_PATH = os.path.join(BASE_DIR, "numbers.json")
 CONF_PATH = os.path.join(BASE_DIR, "settings.json")
+LEARN_PATH = os.path.join(BASE_DIR, "learning.json")     # 拾った修正（学習候補・修正履歴・計測）。辞書とは別
 # 同梱ファイル（アイコンなど）の場所: .exe では展開先、スクリプトでは同じフォルダ
 RES_DIR = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
 
@@ -177,6 +178,15 @@ class App:
         self.volume = core.step_volume(int(self.conf.get("volume", 100) or 0), 0)
         self.muted = bool(self.conf.get("muted", False))
         self.auto_watch = tk.BooleanVar(value=self.conf.get("auto_watch", True))
+        # YMM4 で直した読みがコピーされたら拾う（学習候補に溜める）。すべてこのPCの中だけで、どこにも送らない
+        self.capture_on = tk.BooleanVar(value=self.conf.get("capture_corrections", True))
+        self.capture_info = tk.StringVar()
+        self._recent: list[core.OutputLine] = []     # 最近出した行（修正と照合する）
+        try:
+            self.learning = core.LearningStore.load(LEARN_PATH)
+        except Exception:
+            self.learning = core.LearningStore()      # 読めなければ空で始める（元のファイルは上書きしない）
+            self._learn_broken = True
         self._away = False         # ほかのアプリに切り替えている間 True
         self._last_copied = None   # このツールが最後にクリップボードへ入れた物
         self._texts = []
@@ -235,6 +245,9 @@ class App:
         root.protocol("WM_DELETE_WINDOW", self.on_close)
         # ほかのアプリ（YMM4）から戻ってきたら、新しくコピーされた読みを自動で変換する
         self._clip_seen = self._clipboard()
+        self._cap_seen = self._clip_seen              # 起動前からクリップボードにある物は拾わない
+        self._update_capture_info()
+        root.after(1000, self._poll_clipboard)
         root.bind_all("<FocusOut>", lambda e: root.after(80, self._check_away), add="+")
         root.bind_all("<FocusIn>", self._on_focus_in, add="+")
         if self.conf.get("accent_panel"):
@@ -273,6 +286,7 @@ class App:
         self.conf["volume"] = self.volume
         self.conf["muted"] = self.muted
         self.conf["auto_watch"] = bool(self.auto_watch.get())
+        self.conf["capture_corrections"] = bool(self.capture_on.get())
         self.conf["phrase_colors"] = bool(self.phrase_colors.get())
         self.conf["counted_lines"] = self._counted_order[-COUNTED_MAX:]
         self.conf["last_version"] = VERSION
@@ -473,6 +487,7 @@ class App:
         self.stop_preview()
         self._remove_wav()
         self.save_dict()
+        self._save_learning()
         self._save_conf()
         self.root.destroy()
 
@@ -657,6 +672,16 @@ class App:
                    "・漢字を含む文章や、このツールが自分でコピーした結果には反応しません\n"
                    "・変換結果を手直ししている途中は、手直しを消さないよう、自動では変換しません\n\n"
                    "自分のタイミングで変換したいときは、チェックを外して［貼り付けて変換］を使ってください。").pack(side="left", padx=4)
+        ttk.Checkbutton(mid, text="直した読みを拾う", variable=self.capture_on,
+                        command=self._toggle_capture).pack(side="left", padx=(12, 0))
+        self._help(mid, "直した読みを拾う",
+                   "このツールの変換結果を YMM4 に貼って耳で直し、直した読みをコピーすると、その瞬間に拾って「学習候補」に溜めます。"
+                   "作業の邪魔はしません。溜まった候補は、学習タブの［拾った修正を候補に並べる］で、登録するかどうかを決めます。\n\n"
+                   "・最近このツールが出した行と、記号（' / , _）を外した仮名が同じで、記号の位置だけが違うものだけを拾います\n"
+                   "・出したままの行や、関係のないコピー、読みそのものを直したものは拾いません\n"
+                   "・すべてこのPCの中だけで動き、どこにも送りません（learning.json に残します）\n"
+                   "・オンの間は、横に「● 見張り中」と出ます").pack(side="left", padx=4)
+        ttk.Label(mid, textvariable=self.capture_info, foreground="#2a7a2a").pack(side="left", padx=(4, 0))
         self.btn_acc = ttk.Button(mid, command=self.toggle_accent_panel)
         self.btn_acc.pack(side="right")
         self._build_accent_panel(tab, mid)
@@ -774,6 +799,9 @@ class App:
             self.out_text.tag_add("applied", f"1.0+{a.start}c", f"1.0+{a.end}c")
             self.out_text.tag_add(tag, f"1.0+{a.start}c", f"1.0+{a.end}c")
         self._update_insight()
+        res.findings += core.history_findings(res.text, self.learning)
+        self._recent = (self._recent + core.output_lines(raw, res))[-core.RECENT_MAX:]
+        self.learning.record_conversion(res)
         self._findings = res.findings
         self._show_issues(res.issues)
         if self.auto_copy.get() and res.text:
@@ -850,7 +878,69 @@ class App:
 
     # 指摘の種類 → ダブルクリックしたときの操作
     FINDING_ACTIONS = {"acronym": "_register_english", "n_head": "_register_english",
-                       "unit_unknown": "_register_unit", "accent_conflict": "_choose_candidate"}
+                       "unit_unknown": "_register_unit", "accent_conflict": "_choose_candidate",
+                       "corrected_before": "_show_history"}
+
+    def _show_history(self, f):
+        h = f.data.get("history") or {}
+        messagebox.showinfo(APP_NAME, f"{h.get('time', '')} に、YMM4 で次のように直しました。\n\n"
+                                      f"このツールの出力：{h.get('out', '')}\n直した後：{h.get('fixed', '')}\n\n"
+                                      "直した所：" + "、".join(c.get("kind", "") for c in h.get("changes", [])))
+
+    # ── 修正の取り込み ──────────────────────────────
+    def _poll_clipboard(self, once=False):
+        """クリップボードを見張り、最近出した行を記号だけ直した物がコピーされたら、学習候補に拾う"""
+        try:
+            if self.capture_on.get():
+                clip = self._clipboard()
+                if clip and clip != self._cap_seen:
+                    self._cap_seen = clip
+                    caps = core.capture_corrections(clip, self._recent) if clip != self._last_copied else []
+                    if caps:
+                        self.learning.add(caps)
+                        self._save_learning()
+                        self._update_capture_info()
+        finally:
+            if not once:
+                self.root.after(800, self._poll_clipboard)
+
+    def _toggle_capture(self):
+        self._cap_seen = self._clipboard()   # オフの間にコピーされていた物は、オンにしても拾わない
+        self._update_capture_info()
+        self._save_conf()
+
+    def _save_learning(self):
+        if getattr(self, "_learn_broken", False):
+            return               # 読めなかった learning.json は上書きしない
+        try:
+            self.learning.save(LEARN_PATH)
+        except OSError:
+            pass
+
+    def _update_capture_info(self):
+        n = len(self.learning.pending)
+        on = self.capture_on.get()
+        self.capture_info.set(("● 見張り中" if on else "") + (f"（学習候補 {n} 件）" if n else ""))
+        if hasattr(self, "btn_captured"):
+            self.btn_captured.configure(text=f"拾った修正を候補に並べる（{n} 件）")
+
+    def load_captured(self):
+        """拾った修正を、学習タブの候補に並べる（登録するかどうかは、ここで人が決める）"""
+        pend = list(self.learning.pending)
+        if not pend:
+            self._refresh_status("拾った修正はありません。　" + self.learning.summary())
+            return
+        cands = []
+        for rec in pend:
+            cands += core.change_candidates(rec, self.numbers, self.dic)
+        seen = {(c.src, c.dst, c.kind) for c in self.cands}
+        self.cands += [c for c in cands if (c.src, c.dst, c.kind) not in seen]
+        self.learning.pending = []
+        self._save_learning()
+        self._update_capture_info()
+        self._fill_cands()
+        self._refresh_status(f"拾った修正 {len(pend)} 行から、候補 {len(cands)} 件を並べました"
+                             "（例外表の候補は「登録」を外してあります）。\n" + self.learning.summary())
 
     def _on_issue_dbl(self, _e):
         sel = self.issue_list.curselection()
@@ -989,6 +1079,10 @@ class App:
         except tk.TclError:
             return
         clip = self._clipboard()
+        if core.matches_recent(clip, self._recent):     # 変換結果（を YMM4 で直した物）は、新しい読みとして変換しない
+            self._clip_seen = clip
+            self._poll_clipboard(once=True)
+            return
         act = core.auto_convert_action(clip, self._clip_seen, self.in_text.get("1.0", "end-1c"),
                                        self._last_copied, self.out_text.get("1.0", "end-1c"),
                                        self._out_converted)
@@ -2076,6 +2170,8 @@ class App:
         row = ttk.Frame(tab)
         row.pack(fill="x", pady=(2, 6))
         ttk.Button(row, text="差分から候補を出す", style="Big.TButton", command=self.do_learn).pack(side="left")
+        self.btn_captured = ttk.Button(row, text="拾った修正を候補に並べる", command=self.load_captured)
+        self.btn_captured.pack(side="left", padx=(12, 0))
         ttk.Button(row, text="すべてチェック", command=lambda: self._check_all(True)).pack(side="left", padx=(12, 4))
         ttk.Button(row, text="すべて外す", command=lambda: self._check_all(False)).pack(side="left")
         ttk.Button(row, text="チェックしたものを辞書に登録", style="Big.TButton",
@@ -2149,6 +2245,9 @@ class App:
         if not iid or col in ("#1", "#5"):
             return
         c = self.cands[int(iid)]
+        if c.extra:
+            self.edit_numbers()           # 例外表の候補は、表の編集画面で直す
+            return
         r = EntryDialog(self.root, self, "候補を編集", c.src, c.dst, c.head_only, "", c.before, c.after).result
         if r:
             c.src, c.dst, c.head_only, _, c.before, c.after = r
@@ -2160,8 +2259,11 @@ class App:
             return
         cnt = {"added": 0, "updated": 0, "same": 0}
         for c in self.cands:
-            if c.use:
+            if c.use and c.extra:
+                cnt[self.dic.add_exception(c.extra["kind"], c.extra["entry"])] += 1
+            elif c.use:
                 cnt[self.dic.upsert(c.src, c.dst, c.head_only, before=c.before, after=c.after)] += 1
+        self.numbers = self.dic.number_table()
         self.save_dict()
         self.cands = [c for c in self.cands if not c.use]
         self._fill_cands()
