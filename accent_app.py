@@ -3,7 +3,7 @@
 
 使い方:
     python accent_app.py
-同じフォルダに accent_dict.json（辞書）と numbers.json（数字の読み表）が作られます。
+同じフォルダに accent_dict.json（辞書。数字の読み表と例外表もこの中）が作られます。
 """
 from __future__ import annotations
 
@@ -155,9 +155,9 @@ class App:
         self.style = ttk.Style(root)
         self._apply_style()
 
-        self._ensure_numbers_file()
-        self.numbers = core.load_numbers(NUM_PATH)
         self.dic, broken = self._load_dict()
+        moved = self._move_numbers_file()
+        self.numbers = self.dic.number_table()
         self.pitch_line = tk.BooleanVar(value=self.conf.get("pitch_line", True))
         self.check_place = tk.BooleanVar(value=self.conf.get("check_location", True))
         self.shortcuts = {k: v for k, v in (self.conf.get("shortcuts") or {}).items()}
@@ -212,6 +212,11 @@ class App:
             self._refresh_status([("この辞書は、もっと新しい版のゆっくりアクセント辞書で作られています。", "warn"),
                                   ("\n辞書を壊さないよう、読み取り専用で開きました。変換はできますが、辞書への登録・削除・保存はできません。"
                                    "新しい版を使ってください。", None)])
+        elif moved:
+            self._refresh_status([("数字の読み表（numbers.json）を、辞書の中に移しました。", "warn"),
+                                  ("\n書き換えていた欄だけを移し、元のファイルは "
+                                   f"{os.path.basename(moved)} に名前を変えて残してあります。"
+                                   "これからは辞書タブの［数字の読み表…］で書き換えます。", None)])
         elif place:
             self._refresh_status(place)
         else:
@@ -236,24 +241,15 @@ class App:
             self._open_panel_at_start()
 
     # ── 数字の読み表 ────────────────────────────────
-    def _ensure_numbers_file(self):
-        """numbers.json が無い／古い形式なら、最新の既定値で作り直す（古いものは退避）。"""
-        need = not os.path.exists(NUM_PATH)
-        if not need:
-            try:
-                with open(NUM_PATH, encoding="utf-8") as f:
-                    need = json.load(f).get("version", 1) < core.DEFAULT_NUMBERS["version"]
-            except Exception:
-                need = True
-            if need:
-                bak = os.path.join(BASE_DIR, "numbers_old_backup.json")
-                try:
-                    os.replace(NUM_PATH, bak)
-                except Exception:
-                    pass
-        if need:
-            with open(NUM_PATH, "w", encoding="utf-8") as f:
-                json.dump(core.DEFAULT_NUMBERS, f, ensure_ascii=False, indent=1)
+    def _move_numbers_file(self):
+        """v0.9 までの numbers.json を辞書の中へ移す（初回だけ）。移したら、名前を変えた先を返す"""
+        try:
+            dst = core.move_numbers_into(self.dic, NUM_PATH)
+        except Exception:
+            return None          # 読めない numbers.json は触らない（辞書は既定の表で動く）
+        if dst:
+            self.save_dict()
+        return dst
 
     # ── 設定 ────────────────────────────────────────
     def _load_conf(self):
@@ -2079,8 +2075,7 @@ class App:
                         command=self._fill_dict).pack(side="left", padx=(8, 4))
         self.risky_info = tk.StringVar()
         ttk.Label(top, textvariable=self.risky_info, foreground=MSG_STYLE["warn"]["fg"]).pack(side="left")
-        ttk.Button(top, text="数字の読み表を開く", command=self.open_numbers).pack(side="right")
-        ttk.Button(top, text="読み表を再読み込み", command=self.reload_numbers).pack(side="right", padx=6)
+        ttk.Button(top, text="数字の読み表…", command=self.edit_numbers).pack(side="right")
 
         cols = ("src", "dst", "ctx", "head", "hits", "added", "warn", "note")
         tv = ttk.Treeview(tab, columns=cols, show="headings", selectmode="extended")
@@ -2571,6 +2566,7 @@ class App:
             self.save_dict()
             self._backup_dict()
             self.dic = d
+            self.numbers = d.number_table()      # 数字の読み表も、戻した辞書のもの
             self.save_dict()
             self._fill_dict()
             w.destroy()
@@ -2605,24 +2601,67 @@ class App:
         if p:
             self.dic.save(p, VERSION)
 
-    def open_numbers(self):
-        try:
-            if sys.platform.startswith("win"):
-                os.startfile(NUM_PATH)
-            elif sys.platform == "darwin":
-                subprocess.Popen(["open", NUM_PATH])
-            else:
-                subprocess.Popen(["xdg-open", NUM_PATH])
-        except Exception as ex:
-            messagebox.showerror(APP_NAME, f"開けませんでした。\n{NUM_PATH}\n{ex}")
+    def edit_numbers(self):
+        """数字の読み表（書き換えた欄）と例外表を、JSON のまま書き換える画面。既定の表と既定の例外は参照用に並べる"""
+        w = tk.Toplevel(self.root)
+        w.title("数字の読み表")
+        w.geometry("900x600")
+        w.transient(self.root)
+        ttk.Label(w, padding=(10, 8, 10, 0), wraplength=860, justify="left",
+                  text="左の2つは、あなたが書き換えた所だけを書きます（書いていない欄は既定のまま使い、アプリの更新で既定が良くなればそのまま届きます）。"
+                       "欄を null にすると「未確定」になり、変換中に使うと指摘します。右の2つは参照用の既定値です。").pack(fill="x")
+        nb = ttk.Notebook(w)
+        nb.pack(fill="both", expand=True, padx=10, pady=8)
+        texts = {}
+        for key, title, value, editable in (
+                ("number_rules", "書き換えた欄", self.dic.sections.get("number_rules", {}), True),
+                ("number_exceptions", "例外表（A〜E）", self.dic.sections.get("number_exceptions", {}), True),
+                ("default_rules", "既定の表（参照）", core.DEFAULT_NUMBERS, False),
+                ("default_exceptions", "既定の例外（参照）", core.DEFAULT_NUMBER_EXCEPTIONS, False)):
+            frm = ttk.Frame(nb)
+            nb.add(frm, text=title)
+            t = tk.Text(frm, wrap="none", font=self.f_entry, undo=True)
+            sb = ttk.Scrollbar(frm, command=t.yview)
+            t.configure(yscrollcommand=sb.set)
+            sb.pack(side="right", fill="y")
+            t.pack(fill="both", expand=True)
+            t.insert("1.0", json.dumps(value, ensure_ascii=False, indent=1))
+            if not editable or self.dic.read_only:
+                t.configure(state="disabled")
+            texts[key] = t
 
-    def reload_numbers(self):
-        try:
-            self.numbers = core.load_numbers(NUM_PATH)
-            self._refresh_status("数字の読み表を再読み込みしました")
-        except Exception as ex:
-            messagebox.showerror(APP_NAME, f"numbers.json を読めませんでした。\n{ex}")
+        def save():
+            if not self._dict_writable(parent=w):
+                return
+            new = {}
+            for key in ("number_rules", "number_exceptions"):
+                try:
+                    v = json.loads(texts[key].get("1.0", "end-1c") or "{}")
+                except ValueError as ex:
+                    messagebox.showerror(APP_NAME, f"「{nb.tab(list(texts).index(key), 'text')}」の書き方が正しくありません。\n{ex}", parent=w)
+                    return
+                if not isinstance(v, dict) or (key == "number_exceptions" and
+                                               any(not isinstance(x, list) for x in v.values())):
+                    messagebox.showerror(APP_NAME, "{ } で囲んだ形で書いてください（例外表は、種類ごとに [ ] の一覧）。", parent=w)
+                    return
+                new[key] = v
+            try:
+                core.merge_numbers(new["number_rules"])
+                core.number_exception_table(new["number_exceptions"])
+            except Exception as ex:
+                messagebox.showerror(APP_NAME, f"この表は使えません。\n{ex}", parent=w)
+                return
+            self._backup_dict()
+            self.dic.sections.update(new)
+            self.save_dict()
+            self.numbers = self.dic.number_table()
+            w.destroy()
+            self._refresh_status("数字の読み表を保存しました。次の［変換］から使います。")
 
+        bf = ttk.Frame(w, padding=(10, 0, 10, 10))
+        bf.pack(fill="x")
+        ttk.Button(bf, text="保存", command=save).pack(side="right")
+        ttk.Button(bf, text="閉じる", command=w.destroy).pack(side="right", padx=6)
 
     # ── タブ4: 設定 ─────────────────────────────────
     def _build_settings(self, nb):

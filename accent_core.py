@@ -5,7 +5,7 @@
     YMM4の初期出力
       → normalize()        記号の半角/全角そろえ・空白除去・仮名の整理
       → resolve_units()    <NUMK>/ の直後の読みを単位に解決（単位辞書）。指摘も集める
-      → expand_numbers()   <NUMK ...> タグを仮名に展開（numbers.json の表に従う）
+      → expand_numbers()   <NUMK ...> タグを仮名に展開（数字の表＋例外表 A〜E。表は辞書の number_rules で上書き）
       → Dictionary.apply() 辞書で置き換え（最長一致・1パス）
       → validate()         AquesTalk記号列としての検査
 """
@@ -239,23 +239,56 @@ DEFAULT_NUMBERS = {
 }
 
 
-def load_numbers(path: str | None) -> dict:
-    """既定値に numbers.json の内容を重ねる（辞書は1段深くまでマージ）。"""
+def merge_numbers(user: dict | None) -> dict:
+    """既定の表に、ユーザーが書き換えた欄を重ねる（辞書は1段深くまで。助数詞は1つずつ丸ごと置き換え）。
+    値が null（None）の欄は「未確定」として 〓 にする（変換中に使うと指摘する）"""
     table = copy.deepcopy(DEFAULT_NUMBERS)
+    for k, v in (user or {}).items():
+        if k == "counters" and isinstance(v, dict):
+            for ck, cv in v.items():
+                table["counters"][ck] = cv
+        elif isinstance(v, dict) and isinstance(table.get(k), dict):
+            table[k].update(v)
+        else:
+            table[k] = v
+    for k, v in table.items():
+        if isinstance(v, dict) and not k.startswith("_") and k != "counters":
+            for dk, dv in v.items():
+                if dv is None:
+                    v[dk] = PLACEHOLDER
+    return table
+
+
+def load_numbers(path: str | None) -> dict:
+    """既定値に numbers.json の内容を重ねる（v0.9 までの形。v1.0.0 からは辞書の number_rules を使う）"""
+    user = None
     if path and os.path.exists(path):
         with open(path, encoding="utf-8") as f:
             user = json.load(f)
         if user.get("version", 1) < 2:
-            return table          # 古い形式の表は使わない（v0.1 のもの）
-        for k, v in user.items():
-            if k == "counters" and isinstance(v, dict):
-                for ck, cv in v.items():
-                    table["counters"][ck] = cv
-            elif isinstance(v, dict) and isinstance(table.get(k), dict):
-                table[k].update(v)
-            else:
-                table[k] = v
-    return table
+            user = None           # 古い形式の表は使わない（v0.1 のもの）
+    return merge_numbers(user)
+
+
+def number_diff(user: dict) -> dict:
+    """numbers.json（既定の表をまるごと写した物）から、既定と違う欄だけを取り出す（辞書の number_rules に移すため）。
+    既定と同じ値の欄は残さない（アプリの更新で既定の表が良くなったとき、そのまま届くように）"""
+    out: dict = {}
+    for k, v in user.items():
+        if k.startswith("_") or k == "version":
+            continue
+        dv = DEFAULT_NUMBERS.get(k)
+        if k == "counters" and isinstance(v, dict) and isinstance(dv, dict):
+            ch = {ck: cv for ck, cv in v.items() if dv.get(ck) != cv}
+            if ch:
+                out[k] = ch
+        elif isinstance(v, dict) and isinstance(dv, dict):
+            ch = {sk: sv for sk, sv in v.items() if dv.get(sk, object()) != sv}
+            if ch:
+                out[k] = ch
+        elif v != dv:
+            out[k] = v
+    return out
 
 
 def _plain(s: str) -> str:
@@ -484,7 +517,12 @@ COMMA_SPLIT_RE = re.compile(r"<NUMK\s+VAL=(\d+)\s*>,<NUMK\s+VAL=(\d{3}(?:\.\d+)?
 NUM_OPEN, NUM_CLOSE = "\ue000", "\ue001"   # 学習用: 数字から作った部分の目印
 
 
-def expand_numbers(s: str, t: dict, mark: bool = False) -> str:
+def expand_numbers(s: str, t: dict, mark: bool = False, units: dict | None = None,
+                   ex: dict | None = None, log: list | None = None) -> str:
+    """数字タグを仮名に展開する。units（unit_table）と ex（number_exception_table）があれば、
+    単位つきの数（UNIT=）と、助数詞の無い数に例外表を当てる。log には NumberHit と Finding を足す"""
+    units = unit_table() if units is None else units
+    ex = number_exception_table() if ex is None else ex
     # タグにする前の置き換え
     for a, b in t.get("raw_fixes", []):
         s = s.replace(a, b)
@@ -505,8 +543,14 @@ def expand_numbers(s: str, t: dict, mark: bool = False) -> str:
             continue
         pre = s[pos:m.start()]
         attrs = {k.upper(): v for k, v in ATTR_RE.findall(m.group(1))}
-        counter = attrs.get("COUNTER", "") or (UNIT_PREFIX + attrs["UNIT"] if attrs.get("UNIT") else "")
-        reading = read_number(attrs.get("VAL", ""), counter, t)
+        counter = attrs.get("COUNTER", "")
+        unit = attrs.get("UNIT", "") if attrs.get("UNIT", "") in units else ""
+        reading, hit = number_reading(attrs.get("VAL", ""), counter, unit, t, units, ex)
+        if log is not None and hit:
+            log.append(hit)
+            if reading and PLACEHOLDER in reading:
+                log.append(Finding("数字", "number_unfilled", hit.value,
+                                   f"数字表が未確定の欄を使っています：{hit.value}（読み表の 〓 を埋めてください）", "表を埋める"))
         if reading is None:
             out.append(pre + m.group(0))
             pos = m.end()
@@ -574,8 +618,6 @@ class UnitHit:
     origin: str          # "既定" / "辞書"
 
 
-UNIT_PREFIX = "unit:"    # 数字の表の counters に足すときの名前（unit:kelvin）
-
 # 既定の単位。読みとアクセントが決まったものだけを置く（決まっていない単位は「未登録」として指摘する）
 #   reading      : 単位の読み＋アクセント
 #   ymm4_readings: YMM4 が出す読み（大文字・小文字で読みが分かれるものは、両方を書く）
@@ -600,15 +642,6 @@ def unit_table(user: dict | None = None) -> dict:
         if isinstance(e, dict) and isinstance(e.get("reading"), str) and e["reading"]:
             table[uid] = dict(e, origin="辞書")
     return table
-
-
-def with_units(t: dict, units: dict) -> dict:
-    """数字の表に、単位を助数詞（unit:単位ID、アクセントは単位側）として足した表"""
-    t2 = dict(t)
-    t2["counters"] = dict(t.get("counters", {}))
-    for uid, e in units.items():
-        t2["counters"][UNIT_PREFIX + uid] = {"reading": normalize(e["reading"]), "mode": "own"}
-    return t2
 
 
 def _is_tail(s: str) -> bool:
@@ -656,6 +689,179 @@ def resolve_units(s: str, units: dict, numbers: dict | None = None) -> tuple[str
             found.append(Finding("単位", "unit_unknown", stem, f"単位らしき未登録の読み：{stem}（数字の直後）", "単位を登録"))
     out.append(s[pos:])
     return "".join(out), hits, found
+
+
+# ─────────────────────────────────────────────
+# 2.6) 数字の読み: 規則エンジン＋優先順位つき例外表
+# ─────────────────────────────────────────────
+# 例外は規則（read_number と数字の表）に書かず、必ずこの表に書く。
+#   A unit      : 数字＋単位の全体          キー (value, unit)          → reading
+#   B number    : 数字の読み                キー (value)                → reading（助数詞の無い数・単位つきの数）
+#   C structural: 位の読み                  キー (place, digit[, final]) → reading（属性が多い方が勝つ）
+#   D            : 規則（数字の表）
+#   E join      : 数字と単位のつなぎ方      キー (unit | row, last)     → join（"" / "," / "/" …）・sokuon
+# A があればそれで確定。なければ数字の読みを B → C → D、つなぎ方を E → 既定（連結し、核は単位側）で決める。
+#   place: thousands / hundreds / tens / digits（一の位）
+#   last : 数の最後の要素。一の位（または小数の最後の桁）なら "1"〜"9"、0 で終わるなら "10" "100" "1000" "10000"
+#   row  : 単位の読みの頭の行（か行の単位では じゅー → じゅっ など）
+EXCEPTION_KINDS = ("unit", "number", "structural", "join")
+PLACES = ("thousands", "hundreds", "tens", "digits")
+UNIT_ROWS = {"か": "かきくけこ", "さ": "さしすせそ", "た": "たちつてと", "は": "はひふへほ", "ぱ": "ぱぴぷぺぽ"}
+
+# 既定の例外（耳で確かめた実例だけ。2026-10 の実測より）
+DEFAULT_NUMBER_EXCEPTIONS = {
+    "unit": [
+        {"value": "67", "unit": "kelvin", "reading": "ろくじゅーなな/け'るびん", "note": "耳で判断"},
+    ],
+    "number": [],
+    "structural": [],
+    "join": [
+        {"unit": "electron_volt", "last": "2", "join": ",", "note": "eV での実測"},
+        {"unit": "electron_volt", "last": "5", "join": ",", "note": "eV での実測"},
+        {"unit": "electron_volt", "last": "9", "join": "/", "note": "eV での実測"},
+        {"unit": "astronomical_unit", "last": "5", "join": ",/", "note": "39.5AU の実発音"},
+        {"row": "か", "last": "10", "sokuon": True, "note": "じゅっけ'るびん（いちけ'るびん は詰めない）"},
+    ],
+}
+
+
+def _ex_key(kind: str, e: dict) -> tuple:
+    if kind == "unit":
+        return (_num_key(e.get("value", "")), e.get("unit", ""))
+    if kind == "number":
+        return (_num_key(e.get("value", "")),)
+    if kind == "structural":
+        return (e.get("place", ""), str(e.get("digit", "")), bool(e.get("final")))
+    return (e.get("unit", ""), e.get("row", ""), str(e.get("last", "")))
+
+
+def _num_key(v) -> str:
+    return str(v).strip().replace(",", "")
+
+
+def number_exception_table(user: dict | None = None) -> dict:
+    """既定の例外に、辞書の number_exceptions を重ねる。同じキーは辞書の方が勝つ。
+    "disabled": true の項目は、同じキーの既定の例外を消す"""
+    out = {}
+    for kind in EXCEPTION_KINDS:
+        items = {}
+        for origin, src in (("既定", DEFAULT_NUMBER_EXCEPTIONS), ("辞書", user or {})):
+            for e in src.get(kind, []) if isinstance(src.get(kind, []), list) else []:
+                if isinstance(e, dict):
+                    items[_ex_key(kind, e)] = dict(e, origin=origin)
+        out[kind] = [e for e in items.values() if not e.get("disabled")]
+    return out
+
+
+@dataclass
+class NumberHit:
+    """数字1つの読みを、どの段・どの項目で決めたか"""
+    value: str
+    counter: str          # 助数詞（COUNTER=）
+    unit: str             # 単位ID（UNIT=）
+    reading_by: str       # 例外 A / 例外 B / 例外 C / 規則
+    join_by: str = ""     # 例外 E / 既定（単位つきのときだけ）
+    entries: list = field(default_factory=list)   # 決め手になった例外の項目
+
+
+def _last_token(n: int, frac: str) -> str:
+    if frac:
+        return frac[-1]
+    if n == 0:
+        return "0"
+    k = 1
+    while n % 10 == 0:
+        n //= 10
+        k *= 10
+    return str(n % 10) if k == 1 else str(k)
+
+
+def _cells(n: int, frac: str) -> list[tuple[str, str, bool]]:
+    """万より下の4桁で使う欄 [(place, digit, 最後の要素か)]"""
+    low = n % 10000
+    digs = [("thousands", low // 1000), ("hundreds", low // 100 % 10), ("tens", low // 10 % 10), ("digits", low % 10)]
+    used = [(p, str(d)) for p, d in digs if d]
+    return [(p, d, i == len(used) - 1 and not frac) for i, (p, d) in enumerate(used)]
+
+
+def _apply_structural(n: int, frac: str, t: dict, ex: dict) -> tuple[dict, list]:
+    """C: 使う欄に、当たる構造の例外があれば、その欄だけ差し替えた表を返す"""
+    rules = ex.get("structural", [])
+    if not rules:
+        return t, []
+    t2, used = None, []
+    for place, digit, final in _cells(n, frac):
+        cands = [e for e in rules if e.get("place") == place and str(e.get("digit")) == digit
+                 and (not e.get("final") or final) and isinstance(e.get("reading"), str)]
+        if not cands:
+            continue
+        best = max(cands, key=lambda e: 1 + bool(e.get("final")))      # 属性が多い方が勝つ
+        if t2 is None:
+            t2 = dict(t)
+        t2[place] = dict(t2[place])
+        t2[place][digit] = normalize(best["reading"])
+        used.append(best)
+    return (t2 or t), used
+
+
+def _unit_row(reading: str) -> str:
+    head = ctx_plain(reading)[:1]
+    return next((r for r, cs in UNIT_ROWS.items() if head and head in cs), "")
+
+
+def number_reading(val: str, counter: str, unit: str, t: dict, units: dict, ex: dict) -> tuple[str | None, NumberHit | None]:
+    """数字1つの読み。助数詞つきは今まで通り read_number（C だけ当てる）。単位つき・助数詞なしは A〜E を当てる"""
+    v = _num_key(val)
+    m = re.fullmatch(r"(\d*)(?:\.(\d+))?", v)
+    if not m or not (m.group(1) or m.group(2)):
+        return None, None
+    n, frac = int(m.group(1) or "0"), m.group(2) or ""
+    hit = NumberHit(v, counter, unit, "規則")
+
+    if unit:
+        a = next((e for e in ex.get("unit", []) if _ex_key("unit", e) == (v, unit) and isinstance(e.get("reading"), str)), None)
+        if a:
+            hit.reading_by, hit.entries = "例外 A", [a]
+            return normalize(a["reading"]), hit
+
+    b = None if counter else next((e for e in ex.get("number", [])
+                                   if _ex_key("number", e) == (v,) and isinstance(e.get("reading"), str)), None)
+    if b:
+        phrases = normalize(b["reading"]).split("/")
+        hit.reading_by, hit.entries = "例外 B", [b]
+    else:
+        t2, used = _apply_structural(n, frac, t, ex)
+        if used:
+            hit.reading_by, hit.entries = "例外 C", used
+        r = read_number(v, counter if not unit else "", t2)
+        if r is None:
+            return None, None
+        if not unit:
+            return r, hit
+        phrases = r.split("/")
+        low = n % 10000
+        if not frac and low // 10 % 10 >= 2 and low % 10 and len(phrases) >= 2:
+            phrases[-2:] = [_plain(phrases[-2]) + _plain(phrases[-1])]   # はちじゅー/きゅー → はちじゅーきゅー（単位の前は一つの要素）
+    if not unit:
+        return "/".join(phrases), hit
+
+    # ── 単位とのつなぎ方（E → 既定） ──
+    ureading = normalize(units[unit]["reading"])
+    last, row = _last_token(n, frac), _unit_row(ureading)
+    cands = [e for e in ex.get("join", []) if str(e.get("last", "")) == last
+             and (e.get("unit") == unit or (not e.get("unit") and row and e.get("row") == row))]
+    e = max(cands, key=lambda e: 2 if e.get("unit") else 1) if cands else None    # 単位ごとの方が、行のまとめより先
+    join, sokuon = (e.get("join", ""), bool(e.get("sokuon"))) if e else ("", False)
+    hit.join_by = "例外 E" if e else "既定"
+    if e:
+        hit.entries = hit.entries + [e]
+    final = phrases[-1]
+    if sokuon:
+        final = _plain(final)
+        if final.endswith("ー"):
+            final = final[:-1] + "っ"
+    phrases[-1] = (_plain(final) + ureading) if not join else (final + join + ureading)
+    return "/".join(p for p in phrases if p), hit
 
 
 DOT_NUMBER_RE = re.compile(r"<NUMK\b([^<>]*)>\.(?:<NUMK\b([^<>]*)>|(\d+))", re.IGNORECASE)
@@ -960,6 +1166,14 @@ class Dictionary:
     def unit_table(self) -> dict:
         """既定の単位に、この辞書の単位辞書（unit_dictionary）を重ねた表"""
         return unit_table(self.sections.get("unit_dictionary"))
+
+    def number_table(self) -> dict:
+        """既定の数字の表に、この辞書の number_rules（書き換えた欄だけ）を重ねた表"""
+        return merge_numbers(self.sections.get("number_rules"))
+
+    def exception_table(self) -> dict:
+        """既定の例外に、この辞書の number_exceptions を重ねた表"""
+        return number_exception_table(self.sections.get("number_exceptions"))
 
     # 編集 -----------------------------------------------------------
     def find(self, src: str, before: str = "", after: str = "") -> Entry | None:
@@ -1421,6 +1635,7 @@ class Result:
     issues: list[Issue] = field(default_factory=list)
     findings: list["Finding"] = field(default_factory=list)   # 人が確かめる所（変換はしない）
     units: list["UnitHit"] = field(default_factory=list)      # 単位に解決した所と、決め手になった項目
+    numbers: list["NumberHit"] = field(default_factory=list)  # 数字ごとの、読みとつなぎ方の決め手
 
 
 @dataclass
@@ -1428,27 +1643,32 @@ class Prepared:
     text: str
     findings: list["Finding"]
     units: list["UnitHit"]
+    numbers: list["NumberHit"] = field(default_factory=list)
 
 
-def preprocess(raw: str, numbers: dict, units: dict | None = None) -> Prepared:
-    """辞書を当てる直前の形と、各段の指摘。units は unit_table() の表（省略すると既定の単位だけ）"""
+def preprocess(raw: str, numbers: dict, units: dict | None = None, ex: dict | None = None) -> Prepared:
+    """辞書を当てる直前の形と、各段の指摘。units は unit_table()、ex は number_exception_table() の表
+    （省略すると既定のものだけ）"""
     units = unit_table() if units is None else units
     s = normalize(raw)
     findings = number_findings(s)
     s, hits, unit_found = resolve_units(s, units, numbers)
     findings += english_findings(s) + unit_found
-    return Prepared(expand_numbers(s, with_units(numbers, units)), findings, hits)
+    log: list = []
+    text = expand_numbers(s, numbers, units=units, ex=ex, log=log)
+    findings += [x for x in log if isinstance(x, Finding)]
+    return Prepared(text, findings, hits, [x for x in log if isinstance(x, NumberHit)])
 
 
-def prepare(raw: str, numbers: dict, units: dict | None = None) -> str:
+def prepare(raw: str, numbers: dict, units: dict | None = None, ex: dict | None = None) -> str:
     """辞書を当てる直前の形（正規化＋単位の解決＋数字展開）。学習でも同じものを使う。"""
-    return preprocess(raw, numbers, units).text
+    return preprocess(raw, numbers, units, ex).text
 
 
 def convert(raw: str, dic: Dictionary, numbers: dict) -> Result:
-    pre = preprocess(raw, numbers, dic.unit_table())
+    pre = preprocess(raw, numbers, dic.unit_table(), dic.exception_table())
     s, applied = dic.apply(pre.text)
-    return Result(s, applied, validate(s), pre.findings, pre.units)
+    return Result(s, applied, validate(s), pre.findings, pre.units, pre.numbers)
 
 
 # ─────────────────────────────────────────────
@@ -1501,8 +1721,9 @@ def _skel_len(s: str) -> int:
 
 def learn(before_raw: str, after_raw: str, numbers: dict, dic: Dictionary | None = None) -> list[Candidate]:
     units = dic.unit_table() if dic else unit_table()
+    ex = dic.exception_table() if dic else None
     b_units = resolve_units(normalize(before_raw), units, numbers)[0]
-    b_all = expand_numbers(b_units, with_units(numbers, units), mark=True).split("\n")
+    b_all = expand_numbers(b_units, numbers, mark=True, units=units, ex=ex).split("\n")
     a_all = normalize(after_raw).split("\n")
     cands: list[Candidate] = []
     for bm, a in zip(b_all, a_all):
@@ -1715,6 +1936,24 @@ def list_backups(folder: str) -> list[str]:
     except OSError:
         return []
     return [os.path.join(folder, n) for n in sorted(names, reverse=True)]
+
+
+def move_numbers_into(dic: Dictionary, path: str, now: _dt.datetime | None = None) -> str | None:
+    """v0.9 までの numbers.json（既定の表をまるごと写した物）のうち、既定と違う欄だけを辞書の number_rules に移す。
+    移したら numbers.json は「numbers_moved_to_dict_日時.json」に名前を変えて残す（消さない）。
+    辞書が読み取り専用・すでに number_rules がある・読めない ときは何もしない。戻り値: 名前を変えた先（しなければ None）"""
+    if dic.read_only or not os.path.exists(path) or dic.sections.get("number_rules"):
+        return None
+    with open(path, encoding="utf-8") as f:
+        user = json.load(f)
+    if not isinstance(user, dict):
+        return None
+    if user.get("version", 1) >= 2:            # v0.1 の古い表は、今までも使っていなかった
+        dic.sections["number_rules"] = number_diff(user)
+    stamp = (now or _dt.datetime.now()).strftime("%Y%m%d-%H%M%S")
+    dst = os.path.join(os.path.dirname(path), f"numbers_moved_to_dict_{stamp}.json")
+    os.replace(path, dst)
+    return dst
 
 
 def open_dictionary(path: str, folder: str, app_version: str = "",
