@@ -641,44 +641,178 @@ def entry_priority(e: "Entry"):
     return (-len(e.src), -sides, -(len(ctx_plain(e.before)) + len(ctx_plain(e.after))), e.key)
 
 
+# ── 辞書の形式（schema）の版と移行 ──
+# 形式の版は "version"（整数）で持ち、アプリの版とは切り離す。
+#   1: 条件なし（v0.2〜）  2: 前後の条件つき（v0.7〜。項目の形は1と同じ）
+#   3: 英字読み辞書・単位辞書・数字の表の欄を持つ（v1.0.0〜）
+#
+# 移行の決まり:
+# 1. 辞書の中身を壊さない。
+# 2. 古い項目の意味を推測で変えない。
+# 3. 知らない情報はできるだけ残す。
+# 4. 移行は1段ずつ行う。
+# 5. このアプリが分かるより新しい形式の辞書は、書き込まない（読み取り専用で開く）。
+SCHEMA_VERSION = 3
+SECTIONS = ("english_dictionary", "unit_dictionary", "number_rules", "number_exceptions")
+
+
+class DictionaryMigrationError(Exception):
+    pass
+
+
+class FutureSchemaError(DictionaryMigrationError):
+    pass
+
+
+class ReadOnlyDictionaryError(Exception):
+    pass
+
+
+def schema_version(data: dict) -> int:
+    """辞書の形式の版。無ければ 1。整数以外（true や "2" など）は受け付けない"""
+    if "version" not in data:
+        return 1
+    v = data["version"]
+    if not isinstance(v, int) or isinstance(v, bool) or v < 1:
+        raise DictionaryMigrationError(f"辞書の形式の版 {v!r} が正しくありません（1 以上の整数のはずです）。")
+    return v
+
+
+def migrate_1_to_2(data: dict) -> dict:
+    """1 と 2 は項目の形が同じ。版だけを上げる"""
+    new = copy.deepcopy(data)
+    new["version"] = 2
+    return new
+
+
+def migrate_2_to_3(data: dict) -> dict:
+    """新しい欄を空で足す。今ある項目（entries）には触らない"""
+    new = copy.deepcopy(data)
+    for k in SECTIONS:
+        new.setdefault(k, {})
+    new["version"] = 3
+    return new
+
+
+MIGRATIONS = {1: migrate_1_to_2, 2: migrate_2_to_3}
+
+
+def migrate_dictionary(data: dict) -> tuple[dict, bool]:
+    """最新の形式へ1段ずつ移行する。戻り値: (移行後, 移行したか)。元の data は変えない"""
+    version = schema_version(data)
+    if version > SCHEMA_VERSION:
+        raise FutureSchemaError(f"辞書の形式 {version} は、このアプリが分かる {SCHEMA_VERSION} より新しい形式です。")
+    changed = False
+    result = copy.deepcopy(data)
+    while version < SCHEMA_VERSION:
+        migrate = MIGRATIONS.get(version)
+        if migrate is None:
+            raise DictionaryMigrationError(f"形式 {version} からの移行処理がありません。")
+        result = migrate(result)
+        version = schema_version(result)
+        changed = True
+    return result, changed
+
+
+def validate_dictionary(data) -> None:
+    """読み込んだ辞書の形を確かめる（おかしければ DictionaryMigrationError）"""
+    if not isinstance(data, dict):
+        raise DictionaryMigrationError("辞書ファイルの形が正しくありません。")
+    entries = data.get("entries", [])
+    if not isinstance(entries, list):
+        raise DictionaryMigrationError("辞書の entries が一覧になっていません。")
+    for i, e in enumerate(entries):
+        if not isinstance(e, dict) or not isinstance(e.get("from"), str) or not isinstance(e.get("to"), str):
+            raise DictionaryMigrationError(f"辞書の {i + 1} 件目の項目が正しくありません。")
+    if schema_version(data) <= SCHEMA_VERSION:
+        for k in SECTIONS:
+            if k in data and not isinstance(data[k], dict):
+                raise DictionaryMigrationError(f"辞書の {k} の形が正しくありません。")
+
+
 class Dictionary:
     FORMAT = "yukkuri-accent-dict"
-    VERSION = 2          # この版が分かる辞書の形式の版（1: 条件なし 2: 前後の条件つき）
+    VERSION = SCHEMA_VERSION     # この版が分かる辞書の形式の版
+    KNOWN = {"format", "version", "name", "entries", "created_with", "last_saved_with", *SECTIONS}
 
     def __init__(self, name: str = "マイ辞書"):
         self.name = name
         self.entries: list[Entry] = []
         self._index: dict[str, list[Entry]] | None = None
-        self.file_version = 0        # 読み込んだファイルの形式の版
+        self.file_version = 0        # 読み込んだファイルの形式の版（0: ファイルから読んでいない）
+        self.migrated_from: int | None = None   # 読み込み時に移行したなら、元の形式の版
+        self.sections: dict = {k: {} for k in SECTIONS}
+        self.created_with = ""       # 辞書を最初に作ったアプリの版
+        self.last_saved_with = ""    # 最後に保存したアプリの版
         self.extra: dict = {}        # この版が知らない、ファイル全体の情報（そのまま保存し直す）
 
     @property
     def newer_format(self) -> bool:
-        """この版より新しい版で作られた辞書か（知らない情報は消さずに残すが、念のため知らせる）"""
+        """この版より新しい版で作られた辞書か"""
         return self.file_version > self.VERSION
+
+    @property
+    def read_only(self) -> bool:
+        """新しい形式の辞書は、変換には使えるが、登録・保存はしない（知らない形式を書き換えて壊さないため）"""
+        return self.newer_format
+
+    def _check_writable(self):
+        if self.read_only:
+            raise ReadOnlyDictionaryError(f"辞書の形式 {self.file_version} は、この版が分かる {self.VERSION} "
+                                          "より新しいため、読み取り専用で開いています。")
 
     # 入出力 ---------------------------------------------------------
     @classmethod
     def load(cls, path: str) -> "Dictionary":
+        """読み込んで、古い形式ならメモリ上で最新の形式に移行する（ファイルは書き換えない。open_dictionary を参照）。
+        新しい形式なら移行せず、読み取り専用にする"""
         d = cls()
         if os.path.exists(path):
             with open(path, encoding="utf-8") as f:
                 data = json.load(f)
+            if not isinstance(data, dict):
+                raise DictionaryMigrationError("辞書ファイルの形が正しくありません。")
+            d.file_version = schema_version(data)
+            if d.file_version <= SCHEMA_VERSION:
+                data, migrated = migrate_dictionary(data)
+                if migrated:
+                    d.migrated_from = d.file_version
+            validate_dictionary(data)
             d.name = data.get("name", d.name)
             d.entries = [Entry.from_json(e) for e in data.get("entries", [])]
-            d.file_version = int(data.get("version", 1) or 1)
-            d.extra = {k: v for k, v in data.items() if k not in ("format", "version", "name", "entries")}
+            d.sections = {k: copy.deepcopy(data.get(k, {})) for k in SECTIONS}
+            d.created_with = data.get("created_with", "")
+            d.last_saved_with = data.get("last_saved_with", "")
+            d.extra = {k: v for k, v in data.items() if k not in cls.KNOWN}
         return d
 
-    def save(self, path: str):
-        ver = 2 if any(e.before or e.after for e in self.entries) else 1
-        data = {"format": self.FORMAT, "version": max(ver, self.file_version),   # 新しい形式の版は下げない
-                "name": self.name, "entries": [e.to_json() for e in sorted(self.entries, key=lambda e: e.key)]}
+    def to_data(self, app_version: str = "") -> dict:
+        data = {"format": self.FORMAT, "version": SCHEMA_VERSION}
+        if not self.created_with and self.file_version == 0 and app_version:
+            self.created_with = app_version      # この版で新しく作った辞書（古い辞書の作成元は推測しない）
+        if self.created_with:
+            data["created_with"] = self.created_with
+        if app_version:
+            self.last_saved_with = app_version
+        if self.last_saved_with:
+            data["last_saved_with"] = self.last_saved_with
+        data["name"] = self.name
+        data["entries"] = [e.to_json() for e in sorted(self.entries, key=lambda e: e.key)]
+        for k in SECTIONS:
+            data[k] = copy.deepcopy(self.sections.get(k, {}))
         for k, v in self.extra.items():
             data.setdefault(k, v)
+        return data
+
+    def save(self, path: str, app_version: str = ""):
+        """同じフォルダの一時ファイルに書いてから置き換える（途中で止まっても、元の辞書が半端にならない）"""
+        self._check_writable()
+        data = self.to_data(app_version)
         tmp = path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=1)
+            f.flush()
+            os.fsync(f.fileno())
         os.replace(tmp, path)
 
     # 編集 -----------------------------------------------------------
@@ -691,6 +825,7 @@ class Dictionary:
 
     def upsert(self, src: str, dst: str, head_only: bool = False, note: str = "",
                before: str = "", after: str = "") -> str:
+        self._check_writable()
         src, dst = normalize(src), normalize(dst)
         before, after = normalize(before).strip(), normalize(after).strip()
         e = self.find(src, before, after)
@@ -706,12 +841,14 @@ class Dictionary:
         return "added"
 
     def remove(self, src: str, before: str = "", after: str = ""):
+        self._check_writable()
         self.entries = [e for e in self.entries if e.key != (src, before, after)]
         self._index = None
 
     def merge(self, other: "Dictionary") -> tuple[int, int]:
         """他の辞書を取り込む。自分の既存項目は優先（上書きしない）。
         使用回数は持ち込まず 0 から数え、登録日は取り込んだ日にする（元の辞書の作者の利用記録を混ぜない）。"""
+        self._check_writable()
         added = skipped = 0
         today = _dt.date.today().isoformat()
         for e in other.entries:
@@ -1394,6 +1531,8 @@ def list_kept(folder: str) -> list[tuple[str, str]]:
             text = f"{y}年{int(m)}月の最初"
         elif label.startswith("newer-"):
             text = "新しい版の辞書を、この版で初めて開く前"
+        elif m := re.match(r"pre-migrate-schema(\d+)-to(\d+)", label):
+            text = f"辞書の形式を {m.group(1)} から {m.group(2)} に移行する前"
         else:
             text = label
         p = os.path.join(d, n)
@@ -1409,6 +1548,22 @@ def list_backups(folder: str) -> list[str]:
     except OSError:
         return []
     return [os.path.join(folder, n) for n in sorted(names, reverse=True)]
+
+
+def open_dictionary(path: str, folder: str, app_version: str = "",
+                    now: _dt.datetime | None = None) -> Dictionary:
+    """アプリの辞書を開く。古い形式なら、移行前の辞書を folder/keep/ に残してから、移行した形で保存し直す。
+    バックアップを残せなかったときは、保存し直さない（次にふつうに保存するときに、新しい形式で書かれる）"""
+    d = Dictionary.load(path)
+    if d.migrated_from is not None and not d.read_only:
+        stamp = (now or _dt.datetime.now()).strftime("%Y%m%d-%H%M%S")
+        try:
+            kept = keep_backup(path, folder, f"pre-migrate-schema{d.migrated_from}-to{SCHEMA_VERSION}-{stamp}")
+        except OSError:
+            kept = None
+        if kept:
+            d.save(path, app_version)
+    return d
 
 
 # ─────────────────────────────────────────────

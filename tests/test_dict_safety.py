@@ -2,7 +2,7 @@
 python tests/test_dict_safety.py"""
 import sys, os, json, tempfile, time
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from accent_core import Dictionary, keep_backup, list_kept, backup_file, list_backups
+from accent_core import Dictionary, ReadOnlyDictionaryError, keep_backup, list_kept, backup_file, list_backups
 
 n = 0
 
@@ -25,23 +25,26 @@ dic = Dictionary.load(p)
 check("昔の形式の項目", [(e.src, e.dst, e.hits, e.added, e.head_only, e.note) for e in dic.entries],
       [("たんさき", "たんさ'き", 12, "2026-06-01", False, ""), ("ぜひ", "ぜ'ひ", 0, "", True, "句頭だけ")])
 dic.save(p)
-check("保存し直しても、条件が無ければ形式は1のまま（昔の版でも読める）", json.load(open(p, encoding="utf-8"))["version"], 1)
+check("保存し直すと最新の形式 3 になる（昔の版でも項目はそのまま読める）", json.load(open(p, encoding="utf-8"))["version"], 3)
 
-# ── 将来の版で増えた情報を、この版で開いて保存しても消さない ──
-future = {"format": "yukkuri-accent-dict", "version": 3, "name": "マイ辞書", "author": "kensyo",
+# ── 将来の形式の辞書は、読み取り専用で開く（知らない形式を書き換えて壊さない） ──
+future = {"format": "yukkuri-accent-dict", "version": 4, "name": "マイ辞書", "author": "kensyo",
           "entries": [{"from": "はし", "to": "はし'", "after": "をわたる", "speaker": "まりさ", "score": 0.9},
                       {"from": "たんさき", "to": "たんさ'き"}]}
 json.dump(future, open(p, "w", encoding="utf-8"), ensure_ascii=False)
+raw = open(p, "rb").read()
 dic = Dictionary.load(p)
-check("新しい版の辞書だと分かる", (dic.file_version, dic.newer_format), (3, True))
-dic.upsert("めいおうせい", "めいおうせ'い")   # この版で1つ足して保存
-dic.save(p)
-back = json.load(open(p, encoding="utf-8"))
-check("形式の版を下げない", back["version"], 3)
-check("ファイル全体の知らない情報も残る", back.get("author"), "kensyo")
-e = next(x for x in back["entries"] if x["from"] == "はし")
-check("項目の知らない情報も残る", (e.get("speaker"), e.get("score"), e.get("after")), ("まりさ", 0.9, "をわたる"))
-check("足した項目も入る", sorted(x["from"] for x in back["entries"]), ["たんさき", "はし", "めいおうせい"])
+check("新しい版の辞書だと分かる", (dic.file_version, dic.newer_format, dic.read_only), (4, True, True))
+check("変換には使える", dic.apply("たんさき")[0], "たんさ'き")
+for name, act in [("登録", lambda: dic.upsert("めいおうせい", "めいおうせ'い")), ("削除", lambda: dic.remove("はし")),
+                  ("取り込み", lambda: dic.merge(Dictionary())), ("保存", lambda: dic.save(p))]:
+    try:
+        act()
+        ok = False
+    except ReadOnlyDictionaryError:
+        ok = True
+    check(f"読み取り専用なので{name}できない", ok, True)
+check("ファイルは一切変わらない", open(p, "rb").read(), raw)
 
 # ── 取り込みでも、知らない情報は消えない ──
 mine = Dictionary()

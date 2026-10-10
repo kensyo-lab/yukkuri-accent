@@ -208,10 +208,10 @@ class App:
             self._refresh_status([("辞書ファイルが壊れていて読み込めませんでした。", "crit"),
                                   (f"\n元のファイルは {os.path.basename(broken)} に名前を変えて残してあります。"
                                    "辞書タブの［バックアップから戻す…］で、前の状態に戻せます。", None)])
-        elif self.dic.newer_format:
+        elif self.dic.read_only:
             self._refresh_status([("この辞書は、もっと新しい版のゆっくりアクセント辞書で作られています。", "warn"),
-                                  ("\nこの版が知らない情報も消さずに残します。念のため、開く前の辞書を backup フォルダの keep に残しました。"
-                                   "できれば新しい版を使ってください", None)])
+                                  ("\n辞書を壊さないよう、読み取り専用で開きました。変換はできますが、辞書への登録・削除・保存はできません。"
+                                   "新しい版を使ってください。", None)])
         elif place:
             self._refresh_status(place)
         else:
@@ -290,8 +290,9 @@ class App:
     def _load_dict(self):
         """辞書を読む。壊れていたら名前を変えて残し、空の辞書で始める（起動できないのを防ぐ）。
         戻り値: (辞書, 壊れていたファイルの退避先 or None)"""
+        self._keep_backups()         # 節目の辞書は、移行する前の状態で残す
         try:
-            dic = core.Dictionary.load(DICT_PATH)
+            dic = core.open_dictionary(DICT_PATH, BACKUP_DIR, VERSION)   # 古い形式なら、移行前の辞書を keep に残して移行する
         except Exception:
             stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
             dst = os.path.join(BASE_DIR, f"accent_dict_broken_{stamp}.json")
@@ -301,14 +302,16 @@ class App:
                 dst = DICT_PATH
             return core.Dictionary(), dst
         self._backup_dict()          # 起動時に1つ写しておく（前回と同じなら写さない）
-        self._keep_backups(dic)
+        if dic.newer_format:
+            try:
+                core.keep_backup(DICT_PATH, BACKUP_DIR, f"newer-{dic.file_version}")
+            except OSError:
+                pass
         return dic, None
 
-    def _keep_backups(self, dic):
-        """節目の辞書を、古い順に消えない所に残す（新しい版を初めて起動する前・月の最初・新しい形式の辞書を開く前）"""
+    def _keep_backups(self):
+        """節目の辞書を、古い順に消えない所に残す（新しい版を初めて起動する前・月の最初）"""
         try:
-            if dic.newer_format:
-                core.keep_backup(DICT_PATH, BACKUP_DIR, f"newer-{dic.file_version}")
             if self.conf.get("last_version") != VERSION:
                 core.keep_backup(DICT_PATH, BACKUP_DIR, f"before-v{VERSION}")
             core.keep_backup(DICT_PATH, BACKUP_DIR, f"month-{datetime.date.today():%Y-%m}")
@@ -501,9 +504,19 @@ class App:
                                    else "［この手直しを学習タブへ送る →］から辞書に登録できます", "warn")])
         return ok
 
+    def _dict_writable(self, parent=None) -> bool:
+        """辞書を書き換えてよいか。読み取り専用（新しい版の辞書）なら知らせて False"""
+        if not self.dic.read_only:
+            return True
+        messagebox.showinfo(APP_NAME, "この辞書は、もっと新しい版のゆっくりアクセント辞書で作られているため、読み取り専用で開いています。\n"
+                                      "辞書への登録・削除・保存はできません。新しい版を使ってください。", parent=parent or self.root)
+        return False
+
     def save_dict(self):
+        if self.dic.read_only:
+            return               # 新しい版の辞書は書き換えない（使用回数なども保存しない）
         try:
-            self.dic.save(DICT_PATH)
+            self.dic.save(DICT_PATH, VERSION)
         except Exception as ex:
             messagebox.showerror(APP_NAME, f"辞書を保存できませんでした。\n{ex}")
 
@@ -1388,6 +1401,8 @@ class App:
 
     def _register_phrase(self, ph):
         """この文節の手直しを、辞書の追加画面に入れて開く（YMM4側＝辞書を当てる前の形、置き換え後＝今の文節）"""
+        if not self._dict_writable():
+            return
         if not self._out_prepared:
             self._refresh_status([("辞書に登録するには、", None), ("先に①に YMM4 の読みを貼って［変換］してください", "warn")])
             return
@@ -2017,6 +2032,8 @@ class App:
             self._fill_cands()
 
     def commit_candidates(self):
+        if not self._dict_writable():
+            return
         cnt = {"added": 0, "updated": 0, "same": 0}
         for c in self.cands:
             if c.use:
@@ -2390,6 +2407,8 @@ class App:
         self._refresh_status()
 
     def add_entry(self):
+        if not self._dict_writable():
+            return
         r = EntryDialog(self.root, self, "辞書に追加", "", "", False, "").result
         if r:
             src, dst, head, note, before, after = r
@@ -2401,6 +2420,8 @@ class App:
             self._fill_dict()
 
     def edit_entry(self):
+        if not self._dict_writable():
+            return
         sel = self.dict_tv.selection()
         if not sel or sel[0] not in self._row_keys:
             return
@@ -2420,6 +2441,8 @@ class App:
             self._fill_dict()
 
     def delete_entries(self):
+        if not self._dict_writable():
+            return
         sel = self.dict_tv.selection()
         if not sel or not messagebox.askyesno(APP_NAME, f"{len(sel)} 件を削除しますか？"):
             return
@@ -2431,6 +2454,8 @@ class App:
         self._fill_dict()
 
     def import_dict(self):
+        if not self._dict_writable():
+            return
         p = filedialog.askopenfilename(title="取り込む辞書", filetypes=[("辞書ファイル", "*.json")])
         if not p:
             return
@@ -2512,7 +2537,7 @@ class App:
 
         def do_restore():
             sel = lb.curselection()
-            if not sel:
+            if not sel or not self._dict_writable(parent=w):
                 return
             p = files[sel[0]]
             try:
@@ -2552,11 +2577,13 @@ class App:
             messagebox.showerror(APP_NAME, f"開けませんでした。\n{path}\n{ex}")
 
     def export_dict(self):
+        if not self._dict_writable():
+            return
         p = filedialog.asksaveasfilename(title="辞書を書き出す", defaultextension=".json",
                                          initialfile="accent_dict_export.json",
                                          filetypes=[("辞書ファイル", "*.json")])
         if p:
-            self.dic.save(p)
+            self.dic.save(p, VERSION)
 
     def open_numbers(self):
         try:
