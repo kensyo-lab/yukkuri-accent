@@ -797,6 +797,11 @@ class App:
         if not self._dict_usable():
             return "break"
         raw = self.in_text.get("1.0", "end-1c")
+        if core.looks_like_source_text(raw):
+            # 台詞の文（漢字まじり）を変換しても、YMM4 で使えない結果にしかならない。変換結果もクリップボードも触らない
+            self._refresh_status([("変換しませんでした。", "crit"),
+                                  ("①に漢字が入っています。台詞の文ではなく、YMM4 の「読み」（仮名と記号の文字列）を貼ってください", "crit")])
+            return "break"
         res = core.convert(raw, self.dic, self.numbers)
         self.out_text.delete("1.0", "end")
         self.out_text.insert("1.0", res.text)
@@ -818,7 +823,8 @@ class App:
         self.learning.record_conversion(res)
         self._findings = res.findings
         self._show_issues(res.issues)
-        if self.auto_copy.get() and res.text:
+        bad = core.has_bad_chars(res.issues)
+        if self.auto_copy.get() and res.text and not bad:
             self._copy(res.text)
         before = set(self._counted)
         if core.count_usage(res.text, res.applied, self._counted):
@@ -830,9 +836,12 @@ class App:
         parts = [(f"{head}：辞書で置き換え {len(res.applied)} か所 ／ ", None)] + self._count_parts(n_err, n_warn)
         if res.findings:
             parts.append((f" ／ 確認 {len(res.findings)}", "warn"))
-        if self.auto_copy.get() and res.text:
+        if self.auto_copy.get() and res.text and not bad:
             parts.append(("　— コピーしました", None))
-        if n_err:
+        if bad:
+            parts.append((f"\n仮名・記号以外の文字（{core.bad_char_list(res.issues, res.text)}）が残っています。"
+                          "直すまでコピーと試聴はできません", "crit"))
+        elif n_err:
             parts.append(("\n赤い所は YMM4 で正しく読まれません。下のチェック結果を見て直してください", "crit"))
         elif res.findings:
             parts.append(("\n人が確かめた方がよい所があります（下のチェック結果の「◇ 確認」）", "warn"))
@@ -1115,8 +1124,14 @@ class App:
         s = self.out_text.get("1.0", "end-1c")
         if s:
             norm = core.normalize(s)
+            issues = core.validate(norm)
+            if core.has_bad_chars(issues):
+                self._refresh_status([("コピーしませんでした。", "crit"),
+                                      (f"仮名・記号以外の文字（{core.bad_char_list(issues, norm)}）が残っています。"
+                                       "直してからコピーしてください", "crit")])
+                return "break"
             self._copy(norm)
-            n_err = sum(i.level == "error" for i in core.validate(norm))
+            n_err = sum(i.level == "error" for i in issues)
             if n_err:
                 self._refresh_status([("コピーしました。", None),
                                       (f"ただし、エラーが {n_err} か所残っています（YMM4 で正しく読まれません）", "crit")])
@@ -1967,6 +1982,13 @@ class App:
         if not text:
             messagebox.showinfo(APP_NAME, "読み上げる所がありません。\n"
                                 "変換結果の欄に、仮名の読みが入っていません。①に YMM4 の読みを貼って変換してから押してください。")
+            return
+        issues = core.validate(text)
+        if core.has_bad_chars(issues):
+            # AquesTalkPlayer に渡すと、分かりにくい終了コードで止まるだけなので、渡す前に止める
+            self._refresh_status([("試聴しませんでした。", "crit"),
+                                  (f"仮名・記号以外の文字（{core.bad_char_list(issues, text)}）が残っています。"
+                                   "赤い所を直してから試聴してください", "crit")])
             return
         voice = self.voice.get().strip()
 
