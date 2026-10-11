@@ -22,7 +22,7 @@ YMM4 の読みを全部自動で正解にすることは目指しません。人
 ## ダウンロードと起動
 
 ### かんたんな方法（Windows・Pythonは不要）
-1. [最新のリリース](https://github.com/kensyo-lab/yukkuri-accent/releases/latest)を開き、下の Assets にある `yukkuri-accent-vX.X-windows.zip` をダウンロードします（「Source code」の方には .exe が入っていません。また、このページ上部の緑の「Code」ボタンから落とせるのもソースコードです）
+1. [最新のリリース](https://github.com/kensyo-lab/yukkuri-accent/releases/latest)を開き、下の Assets にある `yukkuri-accent-vX.X.X-windows.zip` をダウンロードします（「Source code」の方には .exe が入っていません。また、このページ上部の緑の「Code」ボタンから落とせるのもソースコードです）
 
 2. 好きなフォルダに展開します（例: `C:\Users\（ユーザー名）\yukkuri-accent`）。「Program Files」の中や、OneDrive などの同期フォルダは避けてください。OneDrive のバックアップがオンだと「デスクトップ」「ドキュメント」も OneDrive の中になります（こうした場所で起動すると、メッセージ欄で知らせます）
 3. `yukkuri-accent.exe` をダブルクリックして起動します

@@ -17,7 +17,7 @@
 ## 1. ダウンロード・起動
 
 ### Q. どのファイルをダウンロードすればいいですか？
-[最新のリリース](https://github.com/kensyo-lab/yukkuri-accent/releases/latest)の下にある ｢Assets｣の `yukkuri-accent-vX.X-windows.zip` です。
+[最新のリリース](https://github.com/kensyo-lab/yukkuri-accent/releases/latest)の下にある ｢Assets｣の `yukkuri-accent-vX.X.X-windows.zip` です。
 「Source code (zip)」「Source code (tar.gz)」や、リポジトリ画面の緑の「Code」ボタンから落とせるのは開発者向けのソースコードで、`.exe` は入っていません。
 
 ### Q. 「WindowsによってPCが保護されました」と出て起動できません
