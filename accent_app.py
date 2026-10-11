@@ -711,6 +711,7 @@ class App:
         self.out_text.tag_configure("applied", background=COL_APPLIED)
         self.out_text.tag_configure("warn", background=COL_WARN)
         self.out_text.tag_configure("error", background=COL_ERROR)
+        self.in_text.tag_configure("error", background=COL_ERROR)   # 読みに入らないはずの文字
         self.out_text.tag_raise("sel")
         self.out_text.bind("<ButtonRelease-1>", self._out_click, add="+")
 
@@ -797,10 +798,22 @@ class App:
         if not self._dict_usable():
             return "break"
         raw = self.in_text.get("1.0", "end-1c")
-        if core.looks_like_source_text(raw):
-            # 台詞の文（漢字まじり）を変換しても、YMM4 で使えない結果にしかならない。変換結果もクリップボードも触らない
+        self.in_text.tag_remove("error", "1.0", "end")
+        bad = core.reading_bad_spans(raw)
+        if bad:
+            # 読みの段階で止める。変換結果もクリップボードも触らず、AquesTalkPlayer にも渡らない
+            for a, b, _c in bad:
+                self.in_text.tag_add("error", f"1.0+{a}c", f"1.0+{b}c")
+            self.in_text.see(f"1.0+{bad[0][0]}c")
+            chars = []
+            for _a, _b, c in bad:
+                if c not in chars:
+                    chars.append(c)
+            shown = "・".join(chars[:8]) + ("…" if len(chars) > 8 else "")
+            why = ("台詞の文ではなく、YMM4 の「読み」（仮名と記号の文字列）を貼ってください"
+                   if core.looks_like_source_text(raw) else "読みに入らないはずの文字です。貼り間違いがないか確かめてください")
             self._refresh_status([("変換しませんでした。", "crit"),
-                                  ("①に漢字が入っています。台詞の文ではなく、YMM4 の「読み」（仮名と記号の文字列）を貼ってください", "crit")])
+                                  (f"①に仮名・記号以外の文字（{shown}）が {len(bad)} か所あります（赤い所）。\n{why}", "crit")])
             return "break"
         res = core.convert(raw, self.dic, self.numbers)
         self.out_text.delete("1.0", "end")

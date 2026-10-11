@@ -1561,6 +1561,26 @@ def looks_like_source_text(s: str) -> bool:
     return bool(_KANJI_RE.search(TAG_RE.sub("", s or "")))
 
 
+def reading_bad_spans(raw: str) -> list[tuple[int, int, str]]:
+    """①に貼った YMM4 の読みのうち、読みに入っているはずのない文字の場所 [(始め, 終わり, 文字)]。
+    YMM4 の読みは、英字も単位もカナになって届き、数字は <タグ> で届く。なので、入ってよいのは
+    仮名・AquesTalk の記号・句読点・空白・<タグ>、それと正規化で直せる記号（’ ／ ？ など）だけ。
+    「！」は変換後のチェックで直し方を案内するので、ここでは止めない。位置は raw のまま（画面で塗るため）"""
+    out: list[tuple[int, int, str]] = []
+    tags = [(m.start(), m.end()) for m in TAG_RE.finditer(raw or "")]
+    t = 0
+    for i, c in enumerate(raw or ""):
+        while t < len(tags) and tags[t][1] <= i:
+            t += 1
+        if t < len(tags) and tags[t][0] <= i:
+            continue
+        if c in SPACES or c in "\n！!":
+            continue
+        if not _allowed(WIDTH_MAP.get(c, c)):
+            out.append((i, i + 1, c))
+    return out
+
+
 def validate(s: str) -> list[Issue]:
     issues: list[Issue] = []
     tag_spans = [(m.start(), m.end()) for m in TAG_RE.finditer(s)]
