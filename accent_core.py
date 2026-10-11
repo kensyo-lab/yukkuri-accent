@@ -1535,10 +1535,50 @@ class Issue:
     start: int
     end: int
     msg: str
+    kind: str = ""   # "char" = 仮名・記号以外の文字（このまま YMM4 に渡してはいけない）
 
 
 def _allowed(c: str) -> bool:
     return is_hira(c) or is_kata(c) or c in "ー" or c in MARKS or c in PUNCT or c in (DEVOICE, "\n")
+
+
+def has_bad_chars(issues: list[Issue]) -> bool:
+    """仮名・記号以外の文字が残っているか。残っていれば、コピーも試聴もさせない"""
+    return any(i.kind == "char" for i in issues)
+
+
+def bad_char_list(issues: list[Issue], s: str, limit: int = 8) -> str:
+    """残っている使えない文字を「秒・終・小」のように並べる（同じ文字は1回だけ）"""
+    seen: list[str] = []
+    for i in issues:
+        if i.kind == "char" and s[i.start:i.end] not in seen:
+            seen.append(s[i.start:i.end])
+    return "・".join(seen[:limit]) + ("…" if len(seen) > limit else "")
+
+
+def looks_like_source_text(s: str) -> bool:
+    """YMM4 の「読み」ではなく、台詞の文（漢字まじり）が入っているらしいか"""
+    return bool(_KANJI_RE.search(TAG_RE.sub("", s or "")))
+
+
+def reading_bad_spans(raw: str) -> list[tuple[int, int, str]]:
+    """①に貼った YMM4 の読みのうち、読みに入っているはずのない文字の場所 [(始め, 終わり, 文字)]。
+    YMM4 の読みは、英字も単位もカナになって届き、数字は <タグ> で届く。なので、入ってよいのは
+    仮名・AquesTalk の記号・句読点・空白・<タグ>、それと正規化で直せる記号（’ ／ ？ など）だけ。
+    「！」は変換後のチェックで直し方を案内するので、ここでは止めない。位置は raw のまま（画面で塗るため）"""
+    out: list[tuple[int, int, str]] = []
+    tags = [(m.start(), m.end()) for m in TAG_RE.finditer(raw or "")]
+    t = 0
+    for i, c in enumerate(raw or ""):
+        while t < len(tags) and tags[t][1] <= i:
+            t += 1
+        if t < len(tags) and tags[t][0] <= i:
+            continue
+        if c in SPACES or c in "\n！!":
+            continue
+        if not _allowed(WIDTH_MAP.get(c, c)):
+            out.append((i, i + 1, c))
+    return out
 
 
 def validate(s: str) -> list[Issue]:
@@ -1559,11 +1599,11 @@ def validate(s: str) -> list[Issue]:
             continue
         nxt = s[i + 1] if i + 1 < len(s) else ""
         if c == PLACEHOLDER:
-            issues.append(Issue("error", i, i + 1, "〓 の所は自動で埋められません（例: ×10⁶ なら〓を「ろく」に）"))
+            issues.append(Issue("error", i, i + 1, "〓 の所は自動で埋められません（例: ×10⁶ なら〓を「ろく」に）", "char"))
         elif c == "！" or c == "!":
-            issues.append(Issue("error", i, i + 1, "「！」は音声記号列では使えません（。 か ？ にしてください）"))
+            issues.append(Issue("error", i, i + 1, "「！」は音声記号列では使えません（。 か ？ にしてください）", "char"))
         elif not _allowed(c):
-            issues.append(Issue("error", i, i + 1, f"AquesTalkで使えない文字「{c}」"))
+            issues.append(Issue("error", i, i + 1, f"AquesTalkで使えない文字「{c}」", "char"))
         if c == DEVOICE:
             if not (is_kata(nxt) or is_hira(nxt)):
                 issues.append(Issue("error", i, i + 1, "_ の直後に仮名がありません"))

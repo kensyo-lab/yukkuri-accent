@@ -23,7 +23,7 @@ from tkinter import ttk, messagebox, filedialog
 import accent_core as core
 
 APP_NAME = "ゆっくりアクセント辞書"
-VERSION = "1.0.1"
+VERSION = "1.0.2"
 
 if getattr(sys, "frozen", False):
     BASE_DIR = os.path.dirname(sys.executable)
@@ -711,6 +711,7 @@ class App:
         self.out_text.tag_configure("applied", background=COL_APPLIED)
         self.out_text.tag_configure("warn", background=COL_WARN)
         self.out_text.tag_configure("error", background=COL_ERROR)
+        self.in_text.tag_configure("error", background=COL_ERROR)   # 読みに入らないはずの文字
         self.out_text.tag_raise("sel")
         self.out_text.bind("<ButtonRelease-1>", self._out_click, add="+")
 
@@ -785,6 +786,23 @@ class App:
         self.in_text.insert("1.0", s)
         self.do_convert()
 
+    def _clear_output(self, bad):
+        """読みが止められたとき、前の台詞の変換結果を消す（残っていると、［コピー］や試聴で前の台詞を使ってしまう）。
+        消した変換結果は、変換結果の欄で Ctrl+Z を押すと戻せる"""
+        self.out_text.delete("1.0", "end")
+        for tag in self._ap_tags:
+            self.out_text.tag_delete(tag)
+        self._ap_tags = {}
+        self._out_converted = self._out_prepared = self._raw_converted = ""
+        self._findings, self._issues = [], []
+        self.issue_list.delete(0, "end")
+        for a, _b, c in bad[:50]:
+            self.issue_list.insert("end", f"✖ エラー　①の {a + 1}文字目: 読みに入らないはずの文字「{c}」")
+            self.issue_list.itemconfig("end", fg="#b00000")
+        if len(bad) > 50:
+            self.issue_list.insert("end", f"…ほか {len(bad) - 50} か所")
+        self._update_insight()
+
     def _dict_usable(self) -> bool:
         """辞書を変換・学習に使えるか。対応していない形式の辞書なら知らせて False"""
         if not self.dic.incompatible:
@@ -797,6 +815,24 @@ class App:
         if not self._dict_usable():
             return "break"
         raw = self.in_text.get("1.0", "end-1c")
+        self.in_text.tag_remove("error", "1.0", "end")
+        bad = core.reading_bad_spans(raw)
+        if bad:
+            # 読みの段階で止める。クリップボードは触らず、AquesTalkPlayer にも渡らない
+            for a, b, _c in bad:
+                self.in_text.tag_add("error", f"1.0+{a}c", f"1.0+{b}c")
+            self.in_text.see(f"1.0+{bad[0][0]}c")
+            self._clear_output(bad)
+            chars = []
+            for _a, _b, c in bad:
+                if c not in chars:
+                    chars.append(c)
+            shown = "・".join(chars[:8]) + ("…" if len(chars) > 8 else "")
+            why = ("台詞の文ではなく、YMM4 の「読み」（仮名と記号の文字列）を貼ってください"
+                   if core.looks_like_source_text(raw) else "読みに入らないはずの文字です。貼り間違いがないか確かめてください")
+            self._refresh_status([("変換しませんでした。", "crit"),
+                                  (f"①に仮名・記号以外の文字（{shown}）が {len(bad)} か所あります（赤い所）。\n{why}", "crit")])
+            return "break"
         res = core.convert(raw, self.dic, self.numbers)
         self.out_text.delete("1.0", "end")
         self.out_text.insert("1.0", res.text)
@@ -818,7 +854,8 @@ class App:
         self.learning.record_conversion(res)
         self._findings = res.findings
         self._show_issues(res.issues)
-        if self.auto_copy.get() and res.text:
+        bad = core.has_bad_chars(res.issues)
+        if self.auto_copy.get() and res.text and not bad:
             self._copy(res.text)
         before = set(self._counted)
         if core.count_usage(res.text, res.applied, self._counted):
@@ -830,9 +867,12 @@ class App:
         parts = [(f"{head}：辞書で置き換え {len(res.applied)} か所 ／ ", None)] + self._count_parts(n_err, n_warn)
         if res.findings:
             parts.append((f" ／ 確認 {len(res.findings)}", "warn"))
-        if self.auto_copy.get() and res.text:
+        if self.auto_copy.get() and res.text and not bad:
             parts.append(("　— コピーしました", None))
-        if n_err:
+        if bad:
+            parts.append((f"\n仮名・記号以外の文字（{core.bad_char_list(res.issues, res.text)}）が残っています。"
+                          "直すまでコピーと試聴はできません", "crit"))
+        elif n_err:
             parts.append(("\n赤い所は YMM4 で正しく読まれません。下のチェック結果を見て直してください", "crit"))
         elif res.findings:
             parts.append(("\n人が確かめた方がよい所があります（下のチェック結果の「◇ 確認」）", "warn"))
@@ -1115,8 +1155,14 @@ class App:
         s = self.out_text.get("1.0", "end-1c")
         if s:
             norm = core.normalize(s)
+            issues = core.validate(norm)
+            if core.has_bad_chars(issues):
+                self._refresh_status([("コピーしませんでした。", "crit"),
+                                      (f"仮名・記号以外の文字（{core.bad_char_list(issues, norm)}）が残っています。"
+                                       "直してからコピーしてください", "crit")])
+                return "break"
             self._copy(norm)
-            n_err = sum(i.level == "error" for i in core.validate(norm))
+            n_err = sum(i.level == "error" for i in issues)
             if n_err:
                 self._refresh_status([("コピーしました。", None),
                                       (f"ただし、エラーが {n_err} か所残っています（YMM4 で正しく読まれません）", "crit")])
@@ -1968,6 +2014,13 @@ class App:
             messagebox.showinfo(APP_NAME, "読み上げる所がありません。\n"
                                 "変換結果の欄に、仮名の読みが入っていません。①に YMM4 の読みを貼って変換してから押してください。")
             return
+        issues = core.validate(text)
+        if core.has_bad_chars(issues):
+            # AquesTalkPlayer に渡すと、分かりにくい終了コードで止まるだけなので、渡す前に止める
+            self._refresh_status([("試聴しませんでした。", "crit"),
+                                  (f"仮名・記号以外の文字（{core.bad_char_list(issues, text)}）が残っています。"
+                                   "赤い所を直してから試聴してください", "crit")])
+            return
         voice = self.voice.get().strip()
 
         self.stop_preview()
@@ -2458,7 +2511,14 @@ class App:
         if not sel:
             return
         r = self._script_data[sel[0]]
-        self._copy(core.normalize(r.text))
+        line = core.normalize(r.text)
+        issues = core.validate(line)
+        if core.has_bad_chars(issues):
+            self._refresh_status([(f"{r.no}行目はコピーしませんでした。", "crit"),
+                                  (f"仮名・記号以外の文字（{core.bad_char_list(issues, line)}）が残っています。"
+                                   "直してからコピーしてください", "crit")])
+            return
+        self._copy(line)
         self._refresh_status(f"{r.no}行目をコピーしました。YMM4 のその台詞に貼り付けてください")
 
     # ── アクセントの聞き比べ ──────────────────────
