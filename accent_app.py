@@ -23,7 +23,7 @@ from tkinter import ttk, messagebox, filedialog
 import accent_core as core
 
 APP_NAME = "ゆっくりアクセント辞書"
-VERSION = "1.0.0"
+VERSION = "1.0.1"
 
 if getattr(sys, "frozen", False):
     BASE_DIR = os.path.dirname(sys.executable)
@@ -218,6 +218,10 @@ class App:
             self._refresh_status([("辞書ファイルが壊れていて読み込めませんでした。", "crit"),
                                   (f"\n元のファイルは {os.path.basename(broken)} に名前を変えて残してあります。"
                                    "辞書タブの［バックアップから戻す…］で、前の状態に戻せます。", None)])
+        elif self.dic.incompatible:
+            self._refresh_status([("この辞書は、もっと新しい版のゆっくりアクセント辞書で作られていて、この版では正しく読めない形式です。", "crit"),
+                                  (f"\n読み違えないよう、変換には使いません（{self.dic.incompatible.rstrip('。')}）。辞書ファイルには触っていません。"
+                                   "新しい版を使ってください。", None)])
         elif self.dic.read_only:
             self._refresh_status([("この辞書は、もっと新しい版のゆっくりアクセント辞書で作られています。", "warn"),
                                   ("\n辞書を壊さないよう、読み取り専用で開きました。変換はできますが、辞書への登録・削除・保存はできません。"
@@ -781,7 +785,17 @@ class App:
         self.in_text.insert("1.0", s)
         self.do_convert()
 
+    def _dict_usable(self) -> bool:
+        """辞書を変換・学習に使えるか。対応していない形式の辞書なら知らせて False"""
+        if not self.dic.incompatible:
+            return True
+        self._refresh_status([("この辞書は、この版では正しく読めない形式です。読み違えないよう、変換に使いません。", "crit"),
+             ("\n辞書ファイルには触っていません。新しい版のゆっくりアクセント辞書を使ってください。", None)])
+        return False
+
     def do_convert(self, auto=False):
+        if not self._dict_usable():
+            return "break"
         raw = self.in_text.get("1.0", "end-1c")
         res = core.convert(raw, self.dic, self.numbers)
         self.out_text.delete("1.0", "end")
@@ -926,6 +940,8 @@ class App:
 
     def load_captured(self):
         """拾った修正を、学習タブの候補に並べる（登録するかどうかは、ここで人が決める）"""
+        if not self._dict_usable():
+            return
         pend = list(self.learning.pending)
         if not pend:
             self._refresh_status("拾った修正はありません。　" + self.learning.summary())
@@ -2193,6 +2209,8 @@ class App:
         self.cands: list[core.Candidate] = []
 
     def do_learn(self):
+        if not self._dict_usable():
+            return
         b = self.l_before.get("1.0", "end-1c")
         a = self.l_after.get("1.0", "end-1c")
         if not b.strip() or not a.strip():
@@ -2689,6 +2707,9 @@ class App:
         except Exception as ex:
             messagebox.showerror(APP_NAME, f"読み込めませんでした。\n{ex}")
             return
+        if other.incompatible:
+            messagebox.showerror(APP_NAME, f"この辞書は、この版では正しく読めない形式なので、取り込めません。\n{other.incompatible}")
+            return
         self._backup_dict()
         added, skipped = self.dic.merge(other)
         self.save_dict()
@@ -2769,6 +2790,9 @@ class App:
                 d = core.Dictionary.load(p)
             except Exception as ex:
                 messagebox.showerror(APP_NAME, f"このバックアップは読めませんでした。\n{ex}", parent=w)
+                return
+            if d.incompatible:
+                messagebox.showerror(APP_NAME, f"このバックアップは、この版では正しく読めない形式です。\n{d.incompatible}", parent=w)
                 return
             if not messagebox.askyesno(APP_NAME, f"辞書を「{labels[sel[0]]}」の状態"
                                                  f"（{len(d.entries)} 件）に戻しますか？\n今の辞書は、バックアップに残します。", parent=w):

@@ -1127,6 +1127,15 @@ def entry_priority(e: "Entry"):
 # 3. 知らない情報はできるだけ残す。
 # 4. 移行は1段ずつ行う。
 # 5. このアプリが分かるより新しい形式の辞書は、書き込まない（読み取り専用で開く）。
+#
+# 新しい形式の辞書は、2種類に分けて扱う。
+#   ・知らない情報が増えただけ（追加型の変更）: 知らない情報は無視して、読み取り専用で変換に使う。
+#   ・対応していない形式（項目の形や意味が変わった）: 変換に使わず、辞書にも触らない（壊れた辞書とは扱わない）。
+# 見分け方:
+#   ・"min_reader_schema"（この辞書を安全に読める、いちばん古い形式の版）が、この版の形式より新しい → 対応していない。
+#     将来の版は、古い版が読み違える変更（項目の形・優先順位の意味など）をしたら、この値を上げること。
+#     追加だけの変更なら上げない（古い版でも、読み取り専用で使える）。
+#   ・min_reader_schema が無くても、項目や欄の形がこの版で読めなければ、対応していないとみなす。
 SCHEMA_VERSION = 3
 SECTIONS = ("english_dictionary", "unit_dictionary", "number_rules", "number_exceptions", "follow_patterns")
 
@@ -1141,6 +1150,39 @@ class FutureSchemaError(DictionaryMigrationError):
 
 class ReadOnlyDictionaryError(Exception):
     pass
+
+
+class IncompatibleDictionaryError(Exception):
+    """この版では正しく読めない（対応していない）形式の辞書を、変換に使おうとした"""
+    pass
+
+
+def reader_problem(data: dict) -> str:
+    """新しい形式の辞書を、この版が安全に読めるか。読めなければ理由（読めれば空）"""
+    m = data.get("min_reader_schema")
+    if m is not None:
+        if not isinstance(m, int) or isinstance(m, bool):
+            return f"min_reader_schema {m!r} が整数ではありません。"
+        if m > SCHEMA_VERSION:
+            return f"この辞書は形式 {m} 以降の版でしか正しく読めません（この版は形式 {SCHEMA_VERSION}）。"
+    try:
+        entries = data.get("entries", [])
+        if not isinstance(entries, list):
+            raise ValueError
+        for e in entries:
+            if not isinstance(e, dict) or not isinstance(e.get("from"), str) or not isinstance(e.get("to"), str):
+                raise ValueError
+            for k in ("before", "after", "note", "added"):
+                if k in e and not isinstance(e[k], str):
+                    raise ValueError
+            if "hits" in e and (not isinstance(e["hits"], int) or isinstance(e["hits"], bool)):
+                raise ValueError
+    except ValueError:
+        return "辞書の項目の形が、この版の知っている形と違います。"
+    for k in SECTIONS:
+        if k in data and not isinstance(data[k], dict):
+            return f"辞書の {k} の形が、この版の知っている形と違います。"
+    return ""
 
 
 def schema_version(data: dict) -> int:
@@ -1208,7 +1250,7 @@ def validate_dictionary(data) -> None:
 class Dictionary:
     FORMAT = "yukkuri-accent-dict"
     VERSION = SCHEMA_VERSION     # この版が分かる辞書の形式の版
-    KNOWN = {"format", "version", "name", "entries", "created_with", "last_saved_with", *SECTIONS}
+    KNOWN = {"format", "version", "name", "entries", "created_with", "last_saved_with", "min_reader_schema", *SECTIONS}
 
     def __init__(self, name: str = "マイ辞書"):
         self.name = name
@@ -1219,6 +1261,8 @@ class Dictionary:
         self.sections: dict = {k: {} for k in SECTIONS}
         self.created_with = ""       # 辞書を最初に作ったアプリの版
         self.last_saved_with = ""    # 最後に保存したアプリの版
+        self.min_reader_schema: int | None = None   # この辞書を安全に読める、いちばん古い形式の版（書いてあれば）
+        self.incompatible = ""       # 対応していない形式なら、その理由（変換に使わない）
         self.extra: dict = {}        # この版が知らない、ファイル全体の情報（そのまま保存し直す）
 
     @property
@@ -1252,12 +1296,19 @@ class Dictionary:
                 data, migrated = migrate_dictionary(data)
                 if migrated:
                     d.migrated_from = d.file_version
+            else:
+                d.incompatible = reader_problem(data)
+                if d.incompatible:
+                    d.name = data.get("name", d.name) if isinstance(data.get("name"), str) else d.name
+                    return d             # 中身は読まない（読み違えて使わないため）。ファイルにも触らない
             validate_dictionary(data)
             d.name = data.get("name", d.name)
             d.entries = [Entry.from_json(e) for e in data.get("entries", [])]
             d.sections = {k: copy.deepcopy(data.get(k, {})) for k in SECTIONS}
             d.created_with = data.get("created_with", "")
             d.last_saved_with = data.get("last_saved_with", "")
+            m = data.get("min_reader_schema")
+            d.min_reader_schema = m if isinstance(m, int) and not isinstance(m, bool) else None
             d.extra = {k: v for k, v in data.items() if k not in cls.KNOWN}
         return d
 
@@ -1271,6 +1322,8 @@ class Dictionary:
             self.last_saved_with = app_version
         if self.last_saved_with:
             data["last_saved_with"] = self.last_saved_with
+        if self.min_reader_schema is not None:
+            data["min_reader_schema"] = self.min_reader_schema
         data["name"] = self.name
         data["entries"] = [e.to_json() for e in sorted(self.entries, key=lambda e: e.key)]
         for k in SECTIONS:
@@ -1883,6 +1936,8 @@ def prepare(raw: str, numbers: dict, units: dict | None = None, ex: dict | None 
 
 
 def convert(raw: str, dic: Dictionary, numbers: dict) -> Result:
+    if dic.incompatible:
+        raise IncompatibleDictionaryError(dic.incompatible)
     pre = preprocess(raw, numbers, dic.unit_table(), dic.exception_table(), dic.english_table())
     conflicts: list = []
     s, applied = dic.apply(pre.text, conflicts=conflicts)
