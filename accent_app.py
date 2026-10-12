@@ -23,7 +23,7 @@ from tkinter import ttk, messagebox, filedialog
 import accent_core as core
 
 APP_NAME = "ゆっくりアクセント辞書"
-VERSION = "1.0.3"
+VERSION = "1.0.4"
 
 if getattr(sys, "frozen", False):
     BASE_DIR = os.path.dirname(sys.executable)
@@ -1509,6 +1509,10 @@ class App:
         cur = t.get("1.0", "end-1c")
         applied = self._applied_now()
         self._infos = core.phrase_statuses(cur, self._out_converted, applied, self._tag_spans("checked"))
+        if cur.strip():
+            # 手直しのたびに検査し直す（赤い所とチェック結果を、［再チェック］を押さなくても今の中身に合わせる）。
+            # 空のとき（①の読みを止めたとき）は、①の誤りを並べた一覧を残す
+            self._show_issues(core.validate(cur))
         for tag in ("ph_unchecked", "ph_manual", "ph_risky"):
             t.tag_remove(tag, "1.0", "end")
         if self.phrase_colors.get():
