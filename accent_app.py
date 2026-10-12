@@ -23,7 +23,7 @@ from tkinter import ttk, messagebox, filedialog
 import accent_core as core
 
 APP_NAME = "ゆっくりアクセント辞書"
-VERSION = "1.0.2"
+VERSION = "1.0.3"
 
 if getattr(sys, "frozen", False):
     BASE_DIR = os.path.dirname(sys.executable)
@@ -854,7 +854,7 @@ class App:
         self.learning.record_conversion(res)
         self._findings = res.findings
         self._show_issues(res.issues)
-        bad = core.has_bad_chars(res.issues)
+        bad = core.blocks_aquestalk(res.issues)     # AquesTalk に渡すとエラーになる所がある
         if self.auto_copy.get() and res.text and not bad:
             self._copy(res.text)
         before = set(self._counted)
@@ -870,10 +870,8 @@ class App:
         if self.auto_copy.get() and res.text and not bad:
             parts.append(("　— コピーしました", None))
         if bad:
-            parts.append((f"\n仮名・記号以外の文字（{core.bad_char_list(res.issues, res.text)}）が残っています。"
-                          "直すまでコピーと試聴はできません", "crit"))
-        elif n_err:
-            parts.append(("\n赤い所は YMM4 で正しく読まれません。下のチェック結果を見て直してください", "crit"))
+            parts.append((f"\nAquesTalk がエラーになる所があります（{core.blocking_summary(res.issues, res.text)}）。"
+                          "赤い所を直すまで、コピーと試聴はできません", "crit"))
         elif res.findings:
             parts.append(("\n人が確かめた方がよい所があります（下のチェック結果の「◇ 確認」）", "warn"))
         elif n_warn:
@@ -1156,18 +1154,13 @@ class App:
         if s:
             norm = core.normalize(s)
             issues = core.validate(norm)
-            if core.has_bad_chars(issues):
+            if core.blocks_aquestalk(issues):
                 self._refresh_status([("コピーしませんでした。", "crit"),
-                                      (f"仮名・記号以外の文字（{core.bad_char_list(issues, norm)}）が残っています。"
-                                       "直してからコピーしてください", "crit")])
+                                      (f"AquesTalk がエラーになる所があります（{core.blocking_summary(issues, norm)}）。"
+                                       "赤い所を直してからコピーしてください", "crit")])
                 return "break"
             self._copy(norm)
-            n_err = sum(i.level == "error" for i in issues)
-            if n_err:
-                self._refresh_status([("コピーしました。", None),
-                                      (f"ただし、エラーが {n_err} か所残っています（YMM4 で正しく読まれません）", "crit")])
-            else:
-                self._refresh_status("コピーしました")
+            self._refresh_status("コピーしました")
         return "break"
 
     # ── アクセント編集（文節ごとの表示とボタン） ─────
@@ -2015,10 +2008,10 @@ class App:
                                 "変換結果の欄に、仮名の読みが入っていません。①に YMM4 の読みを貼って変換してから押してください。")
             return
         issues = core.validate(text)
-        if core.has_bad_chars(issues):
-            # AquesTalkPlayer に渡すと、分かりにくい終了コードで止まるだけなので、渡す前に止める
+        if core.blocks_aquestalk(issues):
+            # AquesTalkPlayer に渡すと、終了コードで止まったり強制終了したりするので、渡す前に止める
             self._refresh_status([("試聴しませんでした。", "crit"),
-                                  (f"仮名・記号以外の文字（{core.bad_char_list(issues, text)}）が残っています。"
+                                  (f"AquesTalk がエラーになる所があります（{core.blocking_summary(issues, text)}）。"
                                    "赤い所を直してから試聴してください", "crit")])
             return
         voice = self.voice.get().strip()
@@ -2329,17 +2322,31 @@ class App:
         if not self._dict_writable():
             return
         cnt = {"added": 0, "updated": 0, "same": 0}
+        held = 0
         for c in self.cands:
-            if c.use and c.extra:
+            if not c.use:
+                continue
+            reading = c.extra.get("entry", {}).get("reading", "") if c.extra else c.dst
+            if reading and core.blocks_aquestalk(core.validate(core.normalize(reading))):
+                # 当たるたびに AquesTalk がエラーになる形は、辞書に入れない（候補に残して直してもらう）
+                c.use, c.status = False, "エラー"
+                held += 1
+                continue
+            if c.extra:
                 cnt[self.dic.add_exception(c.extra["kind"], c.extra["entry"])] += 1
-            elif c.use:
+            else:
                 cnt[self.dic.upsert(c.src, c.dst, c.head_only, before=c.before, after=c.after)] += 1
+            c.status = "登録"
         self.numbers = self.dic.number_table()
         self.save_dict()
-        self.cands = [c for c in self.cands if not c.use]
+        self.cands = [c for c in self.cands if c.status != "登録"]
         self._fill_cands()
         self._fill_dict()
-        self._refresh_status(f"辞書に登録: 追加 {cnt['added']} ／ 更新 {cnt['updated']}")
+        msg = [(f"辞書に登録: 追加 {cnt['added']} ／ 更新 {cnt['updated']}", None)]
+        if held:
+            msg.append((f"\n{held} 件は、AquesTalk がエラーになる形なので登録しませんでした（状態が「エラー」の候補）。"
+                        "ダブルクリックで直してから登録してください", "warn"))
+        self._refresh_status(msg)
 
     # ── タブ3: 辞書 ─────────────────────────────────
     def _build_dict(self, nb):
@@ -2513,9 +2520,9 @@ class App:
         r = self._script_data[sel[0]]
         line = core.normalize(r.text)
         issues = core.validate(line)
-        if core.has_bad_chars(issues):
+        if core.blocks_aquestalk(issues):
             self._refresh_status([(f"{r.no}行目はコピーしませんでした。", "crit"),
-                                  (f"仮名・記号以外の文字（{core.bad_char_list(issues, line)}）が残っています。"
+                                  (f"AquesTalk がエラーになる所があります（{core.blocking_summary(issues, line)}）。"
                                    "直してからコピーしてください", "crit")])
             return
         self._copy(line)
@@ -3268,6 +3275,11 @@ class EntryDialog:
         src, dst = self.v_src.get().strip(), self.v_dst.get().strip()
         if not src or not dst:
             self.msg.set("両方入力してください")
+            return
+        errs = [i for i in core.validate(core.normalize(dst)) if i.level == "error"]
+        if errs:
+            # 辞書に入れると、当たるたびに AquesTalk がエラーになる変換結果を作ってしまう
+            self.msg.set("⚠ 置き換え後が AquesTalk でエラーになるので登録できません：" + errs[0].msg)
             return
         self.result = (src, dst, bool(self.v_head.get()), self.v_note.get().strip(),
                        core.normalize(self.v_before.get()).strip(), core.normalize(self.v_after.get()).strip())

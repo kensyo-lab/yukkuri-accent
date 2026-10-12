@@ -39,8 +39,6 @@ BOUNDARY = SEPS + PUNCT + "\n"
 PLACEHOLDER = "〓"    # 自動では埋められない所（指数など）
 
 SMALL_KANA = set("ぁぃぅぇぉゃゅょゎァィゥェォャュョヮ")
-# 無声化の直後に置けない音（母音・半母音・有声摩擦音）
-AFTER_DEVOICE_NG = set("あいうえおやゆよわアイウエオヤユヨワざじずぜぞザジズゼゾ")
 
 # 打ち間違えやすい記号 → AquesTalkが受け付ける形
 WIDTH_MAP = {
@@ -1539,12 +1537,67 @@ class Issue:
 
 
 def _allowed(c: str) -> bool:
-    return is_hira(c) or is_kata(c) or c in "ー" or c in MARKS or c in PUNCT or c in (DEVOICE, "\n")
+    return is_hira(c) or is_kata(c) or c in "ー゜" or c in MARKS or c in PUNCT or c in (DEVOICE, "\n")
+
+
+# ── AquesTalk 音声記号列仕様書（Ver.1.7）の「読み記号表」 ──
+# 表に無い読み記号（ぐぃ・ぢ・づ・小さい仮名だけ など）は「未定義でエラー」になる（仕様書 2.9）。
+# カタカナは同じ読みの有声音として使える（2.6）。
+_BASE = ("あいうえお かきくけこ さしすせそ たちつてと なにぬねの はひふへほ まみむめも やゆよ らりるれろ わを ん っ ー "
+         "がぎぐげご ざじずぜぞ だでど ばびぶべぼ ぱぴぷぺぽ").split()
+_COMBO = ("いぇ きゃ きゅ きぇ きょ しゃ しゅ しぇ しょ ちゃ ちゅ ちぇ ちょ にゃ にゅ にぇ にょ ひゃ ひゅ ひぇ ひょ "
+          "みゃ みゅ みぇ みょ りゃ りゅ りぇ りょ ぎゃ ぎゅ ぎぇ ぎょ じゃ じゅ じぇ じょ うぃ うぇ うぉ "
+          "つぁ つぃ つぇ つぉ ふぁ ふぃ ふぇ ふぉ びゃ びゅ びぇ びょ ぴゃ ぴゅ ぴぇ ぴょ "
+          "すぃ ずぃ てぃ でぃ とぅ どぅ でゅ てゅ").split()
+READING_SYMBOLS = {x for b in _BASE for x in b} | set(_COMBO)
+READING_SYMBOLS |= {"".join(to_kata(c) for c in x) for x in list(READING_SYMBOLS)}
+READING_SYMBOLS |= set("カ゜ キ゜ ク゜ ケ゜ コ゜ キ゜ャ キ゜ュ キ゜ェ キ゜ョ".split())    # ガ行鼻濁音の手動指定（2.7）
+# 無声化の手動指定（_＋カタカナ）に使える読み記号（読み記号表）
+DEVOICE_SYMBOLS = set("キ ク スィ ス ティ トゥ ヒ フ ピ プ シ シュ チ チュ ツィ ツ フィ".split())
+# 無声化の手動指定の直後に置けない読み記号（3.8 の 5。ざ行は有声摩擦なので、念のため止める）
+AFTER_DEVOICE_NG_SYMBOLS = (set("ー あ い う え お ん や ゆ いぇ よ わ を だ で ど ば び ぶ べ ぼ うぃ うぇ うぉ "
+                                "びゃ びゅ びぇ びょ でぃ どぅ でゅ ざ じ ず ぜ ぞ".split()),
+                            set("ガ ギ グ ゲ ゴ ギャ ギュ ギェ ギョ".split()))
+TAG_OK_RE = re.compile(r"<(?:NUM\s+VAL=[0-9.\-]+|NUMK\s+VAL=[0-9]+(?:\.[0-9]+)?(?:\s+COUNTER=[ぁ-ゖァ-ヺー'゜]+)?"
+                       r"|ALPHA\s+VAL=(?:\"[^\"<>]*\"|[0-9A-Za-z]+))\s*>")
+
+
+def _symbol_at(s: str, i: int) -> str:
+    """s[i] から始まる読み記号（いちばん長く一致するもの。表に無ければ、小さい仮名まで含めた並び）"""
+    for n in (3, 2):
+        if s[i:i + n] in READING_SYMBOLS:
+            return s[i:i + n]
+    j = i + 1
+    while j < len(s) and (s[j] in SMALL_KANA or s[j] == "゜"):
+        j += 1
+    return s[i:j]
 
 
 def has_bad_chars(issues: list[Issue]) -> bool:
-    """仮名・記号以外の文字が残っているか。残っていれば、コピーも試聴もさせない"""
+    """仮名・記号以外の文字が残っているか"""
     return any(i.kind == "char" for i in issues)
+
+
+def blocks_aquestalk(issues: list[Issue]) -> bool:
+    """AquesTalk に渡すとエラーになる所が残っているか。残っていれば、コピーも試聴もさせない
+    （仕様書に「指定できません」とある並びは、AquesTalk が止まる・強制終了することがあるため）"""
+    return any(i.level == "error" for i in issues)
+
+
+def blocking_summary(issues: list[Issue], s: str, limit: int = 3) -> str:
+    """止めた理由を短く（例：仮名・記号以外の文字（秒・終） ／ ' が拗音の途中にあります …）"""
+    if has_bad_chars(issues):
+        head = f"仮名・記号以外の文字（{bad_char_list(issues, s)}）"
+        rest = [i for i in issues if i.level == "error" and i.kind != "char"]
+    else:
+        head, rest = "", [i for i in issues if i.level == "error"]
+    msgs = []
+    for i in rest:
+        m = i.msg.split("（")[0]
+        if m not in msgs:
+            msgs.append(m)
+    parts = ([head] if head else []) + msgs[:limit] + (["…"] if len(msgs) > limit else [])
+    return "・".join(parts)
 
 
 def bad_char_list(issues: list[Issue], s: str, limit: int = 8) -> str:
@@ -1582,20 +1635,35 @@ def reading_bad_spans(raw: str) -> list[tuple[int, int, str]]:
 
 
 def validate(s: str) -> list[Issue]:
+    """AquesTalk 音声記号列として検査する。level "error" は、AquesTalk に渡すとエラー（強制終了も）になるもの。
+    error が1つでもあれば、コピーも試聴もさせない（blocks_aquestalk）"""
     issues: list[Issue] = []
     tag_spans = [(m.start(), m.end()) for m in TAG_RE.finditer(s)]
     for a, b in tag_spans:
-        issues.append(Issue("warn", a, b, "展開されていないタグがあります"))
+        t = s[a:b]
+        if not TAG_OK_RE.fullmatch(t) or b - a - 2 > 255:
+            issues.append(Issue("error", a, b, "AquesTalk が読めない形のタグです", "char"))
+        else:
+            issues.append(Issue("warn", a, b, "展開されていないタグがあります"))
 
     def in_tag(i):
         return any(a <= i < b for a, b in tag_spans)
 
+    def is_kana(c):
+        return is_hira(c) or is_kata(c) or c == "ー"
+
     phrase_start = 0
     accent_seen = -1
     prev = ""
-    for i, c in enumerate(s):
+    last_sym = ""        # この句の最後の読み記号（っ で終わる句を見つけるため）
+    last_sym_at = -1
+    i = 0
+    while i < len(s):
+        c = s[i]
         if in_tag(i):
             prev = c
+            last_sym, last_sym_at = "<タグ>", i
+            i += 1
             continue
         nxt = s[i + 1] if i + 1 < len(s) else ""
         if c == PLACEHOLDER:
@@ -1607,10 +1675,26 @@ def validate(s: str) -> list[Issue]:
         if c == DEVOICE:
             if not (is_kata(nxt) or is_hira(nxt)):
                 issues.append(Issue("error", i, i + 1, "_ の直後に仮名がありません"))
-            else:
-                after = s[i + 2] if i + 2 < len(s) else ""
-                if after in AFTER_DEVOICE_NG:
-                    issues.append(Issue("warn", i, i + 3, f"無声化の直後に「{after}」は置けません（仕様の制限）"))
+                prev = c
+                i += 1
+                continue
+            sym = _symbol_at(s, i + 1)
+            if to_kata(sym[0]) + sym[1:] not in DEVOICE_SYMBOLS:
+                issues.append(Issue("error", i, i + 1 + len(sym),
+                                    f"「_{sym}」は無声化にできません（_キ _ク _シ _ス _チ _ツ _ヒ _フ _ピ _プ など、表にあるものだけ）"))
+            k = i + 1 + len(sym)
+            while k < len(s) and s[k] == ACCENT:
+                k += 1
+            if k < len(s) and not in_tag(k) and is_kana(s[k]):
+                after = _symbol_at(s, k)
+                hira = "".join(to_hira(x) for x in after)
+                if hira in AFTER_DEVOICE_NG_SYMBOLS[0] and after not in AFTER_DEVOICE_NG_SYMBOLS[1] or \
+                        after in AFTER_DEVOICE_NG_SYMBOLS[1]:
+                    issues.append(Issue("error", i, k + len(after), f"無声化（_{sym}）の直後に「{after}」は置けません（仕様の制限）"))
+            last_sym, last_sym_at = "_" + sym, i
+            prev = s[i + len(sym)]
+            i += 1 + len(sym)
+            continue
         if c == ACCENT:
             if i == phrase_start:
                 issues.append(Issue("error", i, i + 1, "' が句の先頭にあります"))
@@ -1619,23 +1703,41 @@ def validate(s: str) -> list[Issue]:
             if accent_seen >= 0:
                 issues.append(Issue("error", i, i + 1, "1つのアクセント句に ' が2つ以上あります（/ や , などで文節区切りを行ってください）"))
             accent_seen = i
-            if nxt in SMALL_KANA:
-                issues.append(Issue("warn", i, i + 2, "' が拗音（ゃゅょ など）の途中にあります"))
-        if c in ("っ", "ッ") and nxt in ("っ", "ッ"):
-            issues.append(Issue("error", i, i + 2, "「っ」が続いています（仕様の制限）"))
-        if c in ("っ", "ッ") and nxt == "ー":
-            issues.append(Issue("error", i, i + 2, "「っ」の直後に「ー」は置けません（仕様の制限）"))
+            if nxt in SMALL_KANA or nxt == "゜":
+                # じ'ゅ のような書き方。仕様書 2.2 でエラーと決まっている（AquesTalk が止まる）
+                issues.append(Issue("error", i, i + 2, f"' が拗音の途中にあります（「{prev}'{nxt}」ではなく「{prev}{nxt}'」）"))
+                prev = c
+                i += 2           # 小さい仮名だけの読み記号として、もう一度とがめない
+                continue
+        if is_kana(c) and not in_tag(i):
+            sym = _symbol_at(s, i)
+            if sym not in READING_SYMBOLS:
+                if c in SMALL_KANA or c == "゜":
+                    issues.append(Issue("error", i, i + len(sym), f"小さい仮名「{sym}」だけでは読めません（前の文字と合わせて1つの読みにします）"))
+                else:
+                    issues.append(Issue("error", i, i + len(sym), f"AquesTalk に無い読み「{sym}」です（読み記号表に無いもの）"))
+            if sym in ("っ", "ッ") and nxt in ("っ", "ッ"):
+                issues.append(Issue("error", i, i + 2, "「っ」が続いています（仕様の制限）"))
+            if sym in ("っ", "ッ") and nxt == "ー":
+                issues.append(Issue("error", i, i + 2, "「っ」の直後に「ー」は置けません（仕様の制限）"))
+            if i == phrase_start and c == "ー":
+                issues.append(Issue("error", i, i + 1, "句の先頭に「ー」は置けません（仕様の制限）"))
+            last_sym, last_sym_at = sym, i
+            prev = s[i + len(sym) - 1]
+            i += len(sym)
+            continue
         if c in BOUNDARY:
+            if last_sym in ("っ", "ッ") and i > phrase_start:
+                issues.append(Issue("error", last_sym_at, last_sym_at + 1, "句の最後が「っ」です（仕様の制限）"))
             if c in SEPS and i > 0 and s[i - 1] == c:
                 issues.append(Issue("warn", i - 1, i + 1, f"区切り「{c}{c}」が重なっています"))
             phrase_start = i + 1
             accent_seen = -1
-        elif i == phrase_start:
-            if c == "ー":
-                issues.append(Issue("error", i, i + 1, "句の先頭に「ー」は置けません（仕様の制限）"))
-            elif c in SMALL_KANA:
-                issues.append(Issue("warn", i, i + 1, "句の先頭が小さい仮名です"))
+            last_sym = ""
         prev = c
+        i += 1
+    if last_sym in ("っ", "ッ"):
+        issues.append(Issue("error", last_sym_at, last_sym_at + 1, "句の最後が「っ」です（仕様の制限）"))
     issues.sort(key=lambda x: (x.start, x.level))
     return issues
 
