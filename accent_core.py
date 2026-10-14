@@ -184,8 +184,12 @@ DEFAULT_NUMBERS = {
     },
     # ── タグにする前の文字列の置き換え ──
     "raw_fixes": [
-        ["かける<NUMK VAL=10>", "かけ'る/じゅ'ーの/〓じょー"],   # ×10⁶ の指数はYMM4で消えるので〓で知らせる
+        # ×10⁶ の指数はYMM4で消えるので〓で知らせる（\ue004 = 前の句にアクセントがあれば / で切り、無ければつなぐ）
+        ["かける<NUMK VAL=10>", "\ue004かけ'る/じゅ'ーの/〓じょー"],
     ],
+    # ×10^15 のように、指数が次の数字タグとして残っているとき（かける<NUMK VAL=10><NUMK VAL=15 COUNTER=..>）
+    #   unit_sep は「じょー」と単位の間の区切り（既定は区切らず、じゅーごじょーきろぐ'らむ と一つの句にする）
+    "power_of_ten": {"times": "かけ'る/じゅ'ーの/", "power": "じょー", "unit_sep": ""},
 
     # ── 助数詞 ──
     #   reading   : 助数詞の読み（省略時は COUNTER の値そのまま）
@@ -509,6 +513,38 @@ def _devoice(seg: str, t: dict) -> str:
     return "".join(out)
 
 
+POWER_RE = re.compile(r"かける<NUMK\s+VAL=10\s*><NUMK\s+VAL=(\d+)((?:\s+COUNTER=[^<>\s]+)?)\s*>", re.IGNORECASE)
+JOIN_MARK = "\ue004"     # 前の句にアクセントがあれば / で切り、無ければそのままつなぐ（1つの句に ' が2つにならないように）
+
+
+def _power_of_ten(m, t: dict) -> str:
+    """かける<NUMK VAL=10><NUMK VAL=15 COUNTER=きろぐらむ> → かけ'る/じゅ'ーの/じゅーごじょーきろぐ'らむ"""
+    rule = {"times": "かけ'る/じゅ'ーの/", "power": "じょー", "unit_sep": "", **(t.get("power_of_ten") or {})}
+    exp = read_number(m.group(1), "", t)
+    if exp is None:
+        return m.group(0)
+    out = JOIN_MARK + rule["times"] + _plain(exp).replace("/", "") + rule["power"]
+    counter = dict((k.upper(), v) for k, v in ATTR_RE.findall(m.group(2) or "")).get("COUNTER", "")
+    if counter:
+        out += rule["unit_sep"] + t.get("counters", {}).get(counter, {}).get("reading", counter)
+    return out
+
+
+def _resolve_joins(s: str) -> str:
+    """JOIN_MARK を、前の句（直前の区切りから）にアクセントがあれば / に、無ければ空にする"""
+    out = []
+    for c in s:
+        if c != JOIN_MARK:
+            out.append(c)
+            continue
+        k = len(out) - 1
+        while k >= 0 and out[k] not in BOUNDARY:
+            k -= 1
+        if ACCENT in out[k + 1:] and out and out[-1] not in BOUNDARY:
+            out.append("/")
+    return "".join(out)
+
+
 COMMA_SPLIT_RE = re.compile(r"<NUMK\s+VAL=(\d+)\s*>,<NUMK\s+VAL=(\d{3}(?:\.\d+)?)([^<>]*)>", re.IGNORECASE)
 
 
@@ -521,6 +557,8 @@ def expand_numbers(s: str, t: dict, mark: bool = False, units: dict | None = Non
     単位つきの数（UNIT=）と、助数詞の無い数に例外表を当てる。log には NumberHit と Finding を足す"""
     units = unit_table() if units is None else units
     ex = number_exception_table() if ex is None else ex
+    # ×10^n（指数が次のタグとして残っているもの）は、〓を出す raw_fixes より先に読む
+    s = POWER_RE.sub(lambda m: _power_of_ten(m, t), s)
     # タグにする前の置き換え
     for a, b in t.get("raw_fixes", []):
         s = s.replace(a, b)
@@ -589,7 +627,7 @@ def expand_numbers(s: str, t: dict, mark: bool = False, units: dict | None = Non
         out.append(NUM_OPEN + seg + NUM_CLOSE if mark else seg)
         prev_counter = counter
     out.append(s[pos:])
-    return "".join(out)
+    return _resolve_joins("".join(out))
 
 
 # ─────────────────────────────────────────────
