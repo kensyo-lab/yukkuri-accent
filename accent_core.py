@@ -188,7 +188,8 @@ DEFAULT_NUMBERS = {
         ["かける<NUMK VAL=10>", "\ue004かけ'る/じゅ'ーの/〓じょー"],
     ],
     # ×10^15 のように、指数が次の数字タグとして残っているとき（かける<NUMK VAL=10><NUMK VAL=15 COUNTER=..>）
-    "power_of_ten": {"times": "かけ'る/じゅ'ーの/", "power": "じょー", "unit_sep": "/"},
+    #   unit_sep は「じょー」と単位の間の区切り（既定は区切らず、じゅーごじょーきろぐ'らむ と一つの句にする）
+    "power_of_ten": {"times": "かけ'る/じゅ'ーの/", "power": "じょー", "unit_sep": ""},
 
     # ── 助数詞 ──
     #   reading   : 助数詞の読み（省略時は COUNTER の値そのまま）
@@ -517,8 +518,8 @@ JOIN_MARK = "\ue004"     # 前の句にアクセントがあれば / で切り�
 
 
 def _power_of_ten(m, t: dict) -> str:
-    """かける<NUMK VAL=10><NUMK VAL=15 COUNTER=きろぐらむ> → かけ'る/じゅ'ーの/じゅーごじょー/きろぐ'らむ"""
-    rule = {"times": "かけ'る/じゅ'ーの/", "power": "じょー", "unit_sep": "/", **(t.get("power_of_ten") or {})}
+    """かける<NUMK VAL=10><NUMK VAL=15 COUNTER=きろぐらむ> → かけ'る/じゅ'ーの/じゅーごじょーきろぐ'らむ"""
+    rule = {"times": "かけ'る/じゅ'ーの/", "power": "じょー", "unit_sep": "", **(t.get("power_of_ten") or {})}
     exp = read_number(m.group(1), "", t)
     if exp is None:
         return m.group(0)

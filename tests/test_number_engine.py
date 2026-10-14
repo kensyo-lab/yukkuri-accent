@@ -115,7 +115,7 @@ check("未知の種類の例外は無視", number_exception_table({"other": [{"x
 from accent_core import validate, blocks_aquestalk
 pw = Dictionary()
 r = convert("_シつりょう<NUMK VAL=6.69>かける<NUMK VAL=10><NUMK VAL=15 COUNTER=きろぐらむ>。", pw, pw.number_table())
-check("指数を読み、じょー は指数の後（6.69×10^15kg）", r.text, "_シつりょう/ろ'くてん/ろ_クきゅ'ー/かけ'る/じゅ'ーの/じゅーごじょー/きろぐ'らむ。")
+check("指数を読み、じょー は指数の後（6.69×10^15kg）", r.text, "_シつりょう/ろ'くてん/ろ_クきゅ'ー/かけ'る/じゅ'ーの/じゅーごじょーきろぐ'らむ。")
 check("1つの句に ' が2つにならない（前の句にアクセントがあれば / で切る）", blocks_aquestalk(validate(r.text)), False)
 check("助数詞なし・2つの句になる指数もつなぐ", convert("<NUMK VAL=2>かける<NUMK VAL=10><NUMK VAL=23>。", pw, pw.number_table()).text,
       "にかけ'る/じゅ'ーの/にじゅーさんじょー。")
