@@ -111,4 +111,18 @@ check("読み取り専用の辞書には移さない", (move_numbers_into(ro, nu
 check("既定の表は merge_numbers と load_numbers(None) で同じ", merge_numbers(None), load_numbers(None))
 check("未知の種類の例外は無視", number_exception_table({"other": [{"x": 1}]})["unit"][0]["value"], "67")
 
+# ── ×10^n（指数が次の数字タグとして残っているとき）──────────────────────
+from accent_core import validate, blocks_aquestalk
+pw = Dictionary()
+r = convert("_シつりょう<NUMK VAL=6.69>かける<NUMK VAL=10><NUMK VAL=15 COUNTER=きろぐらむ>。", pw, pw.number_table())
+check("指数を読み、じょー は指数の後（6.69×10^15kg）", r.text, "_シつりょう/ろ'くてん/ろ_クきゅ'ー/かけ'る/じゅ'ーの/じゅーごじょー/きろぐ'らむ。")
+check("1つの句に ' が2つにならない（前の句にアクセントがあれば / で切る）", blocks_aquestalk(validate(r.text)), False)
+check("助数詞なし・2つの句になる指数もつなぐ", convert("<NUMK VAL=2>かける<NUMK VAL=10><NUMK VAL=23>。", pw, pw.number_table()).text,
+      "にかけ'る/じゅ'ーの/にじゅーさんじょー。")
+check("指数が消えた ×10⁶ は今まで通り 〓 で知らせる（前の句にアクセントが無ければつなぐ）",
+      convert("_シつりょうわ<NUMK VAL=1.3>かける<NUMK VAL=10>/きろぐらむで_ス。", pw, pw.number_table()).text,
+      "_シつりょうわ,/い'ってん/さんかけ'る/じゅ'ーの/〓じょー/きろぐらむで_ス。")
+check("ただの「かける」は触らない（34×11）", convert("<NUMK VAL=34>かける<NUMK VAL=11>。", pw, pw.number_table()).text,
+      "さ'んじゅー/よんかける/じゅ'ーいち。")
+
 print(f"{n} 件 OK")
