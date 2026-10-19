@@ -41,7 +41,14 @@ for sel, want in [
 assert preview_text(None, "") == ("", False)
 assert preview_text("。", "、。") == ("", False)                # 全体にも仮名がなければ空
 assert preview_text(None, "<NUMK VAL=3>") == ("", False)        # タグだけも読めない
-print(f"試聴で読む所 {m + 3} 件 OK")
+# 選んだ所が文の終わりまでなら、後ろの「？」「。」「、」を付けて読む（疑問の言い方が消えないように）
+Q = "え？かんそく/み'す？"
+for sel, want in [("み'す", "み'す？"), ("かんそく/み'す", "かんそく/み'す？"), ("かんそく", "かんそく"), (Q, Q)]:
+    i = Q.index(sel)
+    assert preview_text(sel, Q, Q[i + len(sel):]) == (want, True), (sel, preview_text(sel, Q, Q[i + len(sel):]))
+assert preview_text("とんだ", "とんだ'。", "'。") == ("とんだ。", True)   # 間の ' は飛ばす
+assert preview_text("とんだ", "とんだ/あと。", "/あと。") == ("とんだ", True)   # 文が続くなら付けない
+print(f"試聴で読む所 {m + 3 + 6} 件 OK")
 
 # 他の辞書を取り込んでも、作者の使用回数・登録日は持ち込まない
 import datetime as _dt

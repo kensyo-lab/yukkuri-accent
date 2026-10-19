@@ -23,7 +23,7 @@ from tkinter import ttk, messagebox, filedialog
 import accent_core as core
 
 APP_NAME = "ゆっくりアクセント辞書"
-VERSION = "1.0.5"
+VERSION = "1.0.6"
 
 if getattr(sys, "frozen", False):
     BASE_DIR = os.path.dirname(sys.executable)
@@ -1922,7 +1922,8 @@ class App:
         """選択範囲があればその部分、なければ全体（選択に読める文字がなければ全体）。"""
         t = self.out_text
         sel = t.get("sel.first", "sel.last") if t.tag_ranges("sel") else None
-        text, partial = core.preview_text(sel, t.get("1.0", "end-1c"))
+        after = t.get("sel.last", "end-1c") if sel else ""
+        text, partial = core.preview_text(sel, t.get("1.0", "end-1c"), after)
         # 改行や記号だけをうっかり選んでいたときは、全体を読んだことを知らせる
         if sel and not partial:
             self._preview_note = "（選択した所に読める文字がなかったので、全体を読み上げています）"
@@ -2577,7 +2578,7 @@ class App:
             if not v:
                 return
             if scope.get() == "phrase":
-                text = v.text
+                text = v.text + core.ending_punct(s[ph.end:])   # 文の終わりの文節なら「？」などを付けて読む
             else:
                 a, b = core.line_at(v.whole, ph.start)
                 text = v.whole[a:b]

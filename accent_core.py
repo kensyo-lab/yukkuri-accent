@@ -1850,15 +1850,28 @@ def _join_lines(s: str) -> str:
     return out
 
 
-def preview_text(selected: str | None, whole: str) -> tuple[str, bool]:
+def ending_punct(after: str) -> str:
+    """読む所の直後が文の終わりの句読点（。？、）なら、その1文字（' と空白は飛ばす）。続きの文字があれば空。
+    文節だけを試聴するとき、「み'す」の後ろの「？」を落とすと、疑問の言い方にならないため"""
+    for c in after:
+        if c in ACCENT or c in SPACES:
+            continue
+        return c if c in PUNCT else ""
+    return ""
+
+
+def preview_text(selected: str | None, whole: str, after: str = "") -> tuple[str, bool]:
     """試聴で読み上げる記号列を決める。選択した所に仮名が1つもなければ（改行・空白・記号だけを
     うっかり選んでいたときなど）、選択は無視して全体を読む。全体にも仮名がなければ空を返す。
+    after は選択した所より後ろの文字列。選択が文の終わりまでなら、後ろの「？」「。」「、」を付けて読む。
     戻り値: (読み上げる記号列, 選択した所だけを読むか)"""
     def has_kana(t):
         return any(is_hira(c) or is_kata(c) for c in TAG_RE.sub("", t))
     if selected:
         t = _join_lines(selected)
         if has_kana(t):
+            if t and t[-1] not in PUNCT:
+                t += ending_punct(after)
             return t, True
     t = _join_lines(whole)
     return (t if has_kana(t) else ""), False
