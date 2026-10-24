@@ -23,7 +23,7 @@ from tkinter import ttk, messagebox, filedialog
 import accent_core as core
 
 APP_NAME = "ゆっくりアクセント辞書"
-VERSION = "1.0.5"
+VERSION = "1.0.6"
 
 if getattr(sys, "frozen", False):
     BASE_DIR = os.path.dirname(sys.executable)
@@ -59,7 +59,7 @@ MSG_STYLE = {
     "crit": {"bg": "#ffecec", "bar": "#d0342c", "fg": "#c0201a"},
 }
 MSG_LINES = 3                  # メッセージ欄は最初から3行分の高さを取っておく
-WIN_W, WIN_H = 1040, 780       # 起動時のウィンドウの大きさ（文字の大きさ 100% のとき）
+WIN_W, WIN_H = 1040, 810       # 起動時のウィンドウの大きさ（文字の大きさ 100% のとき。自動で動く機能の段の分だけ高くした）
 SCALE_MIN, SCALE_MAX = 0.8, 2.0  # 文字の大きさの範囲（80%〜200%）
 BACKUP_DIR = os.path.join(BASE_DIR, "backup")
 BACKUP_KEEP = 20
@@ -663,32 +663,36 @@ class App:
 
         mid = ttk.Frame(tab)
         mid.pack(fill="x")
+        # ［アクセント編集］は先に右へ置く（左のボタンやチェックが増えても、押し出されて消えないように）
+        self.btn_acc = ttk.Button(mid, command=self.toggle_accent_panel)
+        self.btn_acc.pack(side="right")
         self._hint("convert", ttk.Button(mid, style="Big.TButton", command=self.do_convert), "変換 ▼").pack(side="left")
         self.auto_copy = tk.BooleanVar(value=self.conf.get("auto_copy", True))
         ttk.Checkbutton(mid, text="変換したら自動でコピー", variable=self.auto_copy).pack(side="left", padx=12)
         ttk.Checkbutton(mid, text="記号を色分け", variable=self.color_marks,
                         command=self._repaint_all).pack(side="left")
-        ttk.Checkbutton(mid, text="戻ってきたら自動で貼り付けて変換", variable=self.auto_watch,
-                        command=self._save_conf).pack(side="left", padx=(12, 0))
-        self._help(mid, "戻ってきたら自動で貼り付けて変換",
+        # クリップボードを見て自動で動く2つは、1段下にまとめる
+        auto = ttk.Frame(tab)
+        auto.pack(fill="x", pady=(4, 0))
+        ttk.Checkbutton(auto, text="戻ってきたら自動で貼り付けて変換", variable=self.auto_watch,
+                        command=self._save_conf).pack(side="left")
+        self._help(auto, "戻ってきたら自動で貼り付けて変換",
                    "YMM4 で読みをコピーして、このツールの画面に戻ってくると、ボタンを押さなくても貼り付けて変換します。\n\n"
                    "・変換タブを開いているときだけ動きます\n"
                    "・漢字を含む文章や、このツールが自分でコピーした結果には反応しません\n"
                    "・変換結果を手直ししている途中は、手直しを消さないよう、自動では変換しません\n\n"
                    "自分のタイミングで変換したいときは、チェックを外して［貼り付けて変換］を使ってください。").pack(side="left", padx=4)
-        ttk.Checkbutton(mid, text="直した読みを拾う", variable=self.capture_on,
+        ttk.Checkbutton(auto, text="直した読みを拾う", variable=self.capture_on,
                         command=self._toggle_capture).pack(side="left", padx=(12, 0))
-        self._help(mid, "直した読みを拾う",
+        self._help(auto, "直した読みを拾う",
                    "このツールの変換結果を YMM4 に貼って耳で直し、直した読みをコピーすると、その瞬間に拾って「学習候補」に溜めます。"
                    "作業の邪魔はしません。溜まった候補は、学習タブの［拾った修正を候補に並べる］で、登録するかどうかを決めます。\n\n"
                    "・最近このツールが出した行と、記号（' / , _）を外した仮名が同じで、記号の位置だけが違うものだけを拾います\n"
                    "・出したままの行や、関係のないコピー、読みそのものを直したものは拾いません\n"
                    "・すべてこのPCの中だけで動き、どこにも送りません（learning.json に残します）\n"
                    "・オンの間は、横に「● 見張り中」と出ます").pack(side="left", padx=4)
-        ttk.Label(mid, textvariable=self.capture_info, foreground="#2a7a2a").pack(side="left", padx=(4, 0))
-        self.btn_acc = ttk.Button(mid, command=self.toggle_accent_panel)
-        self.btn_acc.pack(side="right")
-        self._build_accent_panel(tab, mid)
+        ttk.Label(auto, textvariable=self.capture_info, foreground="#2a7a2a").pack(side="left", padx=(4, 0))
+        self._build_accent_panel(tab, auto)
 
         lab = ttk.Frame(tab)
         lab.pack(fill="x", pady=(10, 0))
