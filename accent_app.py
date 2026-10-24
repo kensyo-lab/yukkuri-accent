@@ -23,7 +23,7 @@ from tkinter import ttk, messagebox, filedialog
 import accent_core as core
 
 APP_NAME = "ゆっくりアクセント辞書"
-VERSION = "1.0.5"
+VERSION = "1.0.6"
 
 if getattr(sys, "frozen", False):
     BASE_DIR = os.path.dirname(sys.executable)
@@ -59,12 +59,18 @@ MSG_STYLE = {
     "crit": {"bg": "#ffecec", "bar": "#d0342c", "fg": "#c0201a"},
 }
 MSG_LINES = 3                  # メッセージ欄は最初から3行分の高さを取っておく
-WIN_W, WIN_H = 1040, 780       # 起動時のウィンドウの大きさ（文字の大きさ 100% のとき）
+WIN_W, WIN_H = 1040, 810       # 起動時のウィンドウの大きさ（文字の大きさ 100% のとき。自動で動く機能の段の分だけ高くした）
 SCALE_MIN, SCALE_MAX = 0.8, 2.0  # 文字の大きさの範囲（80%〜200%）
 BACKUP_DIR = os.path.join(BASE_DIR, "backup")
 BACKUP_KEEP = 20
 ACC_CANVAS_H = 200             # アクセント編集の欄の高さ（100% のとき）
-COL_PITCH = "#5b7db1"          # 高低の線
+COL_PITCH = "#5b7db1"
+# よく押すボタン（コピー・試聴・手直しを辞書の候補に送る）。色分け（淡い背景）と混ざらないよう、濃い一色＋白い文字にする。
+# 白い文字とのコントラスト比は約 6.7：1（WCAG の 4.5：1 以上）
+COL_PRIMARY = "#2f5f8f"
+COL_PRIMARY_HOVER = "#3a70a6"
+COL_PRIMARY_PRESS = "#244a70"
+COL_PRIMARY_DISABLED = "#b9c7d6"          # 高低の線
 
 # 文字の大きさ（100% のときのポイント数）。設定の倍率を掛けて使う。名前: (書体, 大きさ, 太さ)
 FONT_BASE = {
@@ -400,6 +406,23 @@ class App:
         st.configure("Treeview", font=self.fonts["tree"], rowheight=self._sc(26))
         st.configure("Treeview.Heading", font=self.fonts["head"])
         st.configure("Big.TButton", font=self.fonts["big"], padding=(self._sc(12), self._sc(6)))
+        for b in getattr(self, "_primary_btns", []):
+            self._size_primary(b)
+
+    def _primary(self, parent, command, big=True):
+        """よく押すボタン。Windows の標準のボタン（ttk）は色を付けられないので、色を付けられる tk.Button で作る"""
+        b = tk.Button(parent, command=command, bg=COL_PRIMARY, fg="white", activebackground=COL_PRIMARY_PRESS,
+                      activeforeground="white", disabledforeground=COL_PRIMARY_DISABLED, relief="flat", bd=0,
+                      highlightthickness=0, cursor="hand2", font=self.fonts["big" if big else "ui"])
+        b._big = big
+        b.bind("<Enter>", lambda e: b.configure(bg=COL_PRIMARY_HOVER) if str(b["state"]) != "disabled" else None)
+        b.bind("<Leave>", lambda e: b.configure(bg=COL_PRIMARY) if str(b["state"]) != "disabled" else None)
+        self._primary_btns = getattr(self, "_primary_btns", []) + [b]
+        self._size_primary(b)
+        return b
+
+    def _size_primary(self, b):
+        b.configure(padx=self._sc(12 if b._big else 8), pady=self._sc(5 if b._big else 3))
 
     def set_scale(self, v):
         """文字の大きさを変える（80%〜200%）。ウィンドウも同じ割合で大きく／小さくする"""
@@ -663,32 +686,36 @@ class App:
 
         mid = ttk.Frame(tab)
         mid.pack(fill="x")
+        # ［アクセント編集］は先に右へ置く（左のボタンやチェックが増えても、押し出されて消えないように）
+        self.btn_acc = ttk.Button(mid, command=self.toggle_accent_panel)
+        self.btn_acc.pack(side="right")
         self._hint("convert", ttk.Button(mid, style="Big.TButton", command=self.do_convert), "変換 ▼").pack(side="left")
         self.auto_copy = tk.BooleanVar(value=self.conf.get("auto_copy", True))
         ttk.Checkbutton(mid, text="変換したら自動でコピー", variable=self.auto_copy).pack(side="left", padx=12)
         ttk.Checkbutton(mid, text="記号を色分け", variable=self.color_marks,
                         command=self._repaint_all).pack(side="left")
-        ttk.Checkbutton(mid, text="戻ってきたら自動で貼り付けて変換", variable=self.auto_watch,
-                        command=self._save_conf).pack(side="left", padx=(12, 0))
-        self._help(mid, "戻ってきたら自動で貼り付けて変換",
+        # クリップボードを見て自動で動く2つは、1段下にまとめる
+        auto = ttk.Frame(tab)
+        auto.pack(fill="x", pady=(4, 0))
+        ttk.Checkbutton(auto, text="戻ってきたら自動で貼り付けて変換", variable=self.auto_watch,
+                        command=self._save_conf).pack(side="left")
+        self._help(auto, "戻ってきたら自動で貼り付けて変換",
                    "YMM4 で読みをコピーして、このツールの画面に戻ってくると、ボタンを押さなくても貼り付けて変換します。\n\n"
                    "・変換タブを開いているときだけ動きます\n"
                    "・漢字を含む文章や、このツールが自分でコピーした結果には反応しません\n"
                    "・変換結果を手直ししている途中は、手直しを消さないよう、自動では変換しません\n\n"
                    "自分のタイミングで変換したいときは、チェックを外して［貼り付けて変換］を使ってください。").pack(side="left", padx=4)
-        ttk.Checkbutton(mid, text="直した読みを拾う", variable=self.capture_on,
+        ttk.Checkbutton(auto, text="直した読みを拾う", variable=self.capture_on,
                         command=self._toggle_capture).pack(side="left", padx=(12, 0))
-        self._help(mid, "直した読みを拾う",
+        self._help(auto, "直した読みを拾う",
                    "このツールの変換結果を YMM4 に貼って耳で直し、直した読みをコピーすると、その瞬間に拾って「学習候補」に溜めます。"
                    "作業の邪魔はしません。溜まった候補は、学習タブの［拾った修正を候補に並べる］で、登録するかどうかを決めます。\n\n"
                    "・最近このツールが出した行と、記号（' / , _）を外した仮名が同じで、記号の位置だけが違うものだけを拾います\n"
                    "・出したままの行や、関係のないコピー、読みそのものを直したものは拾いません\n"
                    "・すべてこのPCの中だけで動き、どこにも送りません（learning.json に残します）\n"
                    "・オンの間は、横に「● 見張り中」と出ます").pack(side="left", padx=4)
-        ttk.Label(mid, textvariable=self.capture_info, foreground="#2a7a2a").pack(side="left", padx=(4, 0))
-        self.btn_acc = ttk.Button(mid, command=self.toggle_accent_panel)
-        self.btn_acc.pack(side="right")
-        self._build_accent_panel(tab, mid)
+        ttk.Label(auto, textvariable=self.capture_info, foreground="#2a7a2a").pack(side="left", padx=(4, 0))
+        self._build_accent_panel(tab, auto)
 
         lab = ttk.Frame(tab)
         lab.pack(fill="x", pady=(10, 0))
@@ -728,14 +755,14 @@ class App:
 
         bot = ttk.Frame(tab)
         bot.pack(fill="x")
-        self._hint("copy", ttk.Button(bot, style="Big.TButton", command=self.copy_output), "コピー").pack(side="left")
+        self._hint("copy", self._primary(bot, self.copy_output), "コピー").pack(side="left")
         self._hint("recheck", ttk.Button(bot, command=self.recheck), "再チェック").pack(side="left", padx=6)
-        self._hint("send_learn", ttk.Button(bot, command=self.send_manual), "手直しを辞書の候補に送る →").pack(side="right")
+        self._hint("send_learn", self._primary(bot, self.send_manual, big=False), "手直しを辞書の候補に送る →").pack(side="right")
 
         pv = ttk.Frame(tab)
         pv.pack(fill="x", pady=(8, 0))
         # よく使うので、コピーと同じ大きなボタンにする
-        self.btn_play = self._hint("preview", ttk.Button(pv, style="Big.TButton", command=self.preview), "▶ 試聴")
+        self.btn_play = self._hint("preview", self._primary(pv, self.preview), "▶ 試聴")
         self.btn_play.pack(side="left")
         self.btn_stop = self._hint("stop", ttk.Button(pv, style="Big.TButton", command=self.stop_preview), "■ 停止")
         self.btn_stop.pack(side="left", padx=(4, 12))
@@ -767,7 +794,10 @@ class App:
                       foreground="#666").pack(anchor="w")
             for w in (self.btn_play, self.btn_stop, self.voice_box, self.btn_open_player,
                       self.btn_vol_down, self.btn_vol_up, self.btn_mute):
-                w.state(["disabled"])
+                if isinstance(w, tk.Button):
+                    w.configure(state="disabled", bg=COL_PRIMARY_DISABLED, disabledforeground="#f4f6f9", cursor="")
+                else:
+                    w.state(["disabled"])
 
         ttk.Label(tab, text="チェック結果（クリックすると該当箇所を選択）").pack(anchor="w", pady=(10, 2))
         self.issue_list = tk.Listbox(tab, height=4, font=self.f_ui, activestyle="none")
