@@ -64,7 +64,13 @@ SCALE_MIN, SCALE_MAX = 0.8, 2.0  # 文字の大きさの範囲（80%〜200%）
 BACKUP_DIR = os.path.join(BASE_DIR, "backup")
 BACKUP_KEEP = 20
 ACC_CANVAS_H = 200             # アクセント編集の欄の高さ（100% のとき）
-COL_PITCH = "#5b7db1"          # 高低の線
+COL_PITCH = "#5b7db1"
+# よく押すボタン（コピー・試聴・手直しを辞書の候補に送る）。色分け（淡い背景）と混ざらないよう、濃い一色＋白い文字にする。
+# 白い文字とのコントラスト比は約 6.7：1（WCAG の 4.5：1 以上）
+COL_PRIMARY = "#2f5f8f"
+COL_PRIMARY_HOVER = "#3a70a6"
+COL_PRIMARY_PRESS = "#244a70"
+COL_PRIMARY_DISABLED = "#b9c7d6"          # 高低の線
 
 # 文字の大きさ（100% のときのポイント数）。設定の倍率を掛けて使う。名前: (書体, 大きさ, 太さ)
 FONT_BASE = {
@@ -400,6 +406,23 @@ class App:
         st.configure("Treeview", font=self.fonts["tree"], rowheight=self._sc(26))
         st.configure("Treeview.Heading", font=self.fonts["head"])
         st.configure("Big.TButton", font=self.fonts["big"], padding=(self._sc(12), self._sc(6)))
+        for b in getattr(self, "_primary_btns", []):
+            self._size_primary(b)
+
+    def _primary(self, parent, command, big=True):
+        """よく押すボタン。Windows の標準のボタン（ttk）は色を付けられないので、色を付けられる tk.Button で作る"""
+        b = tk.Button(parent, command=command, bg=COL_PRIMARY, fg="white", activebackground=COL_PRIMARY_PRESS,
+                      activeforeground="white", disabledforeground=COL_PRIMARY_DISABLED, relief="flat", bd=0,
+                      highlightthickness=0, cursor="hand2", font=self.fonts["big" if big else "ui"])
+        b._big = big
+        b.bind("<Enter>", lambda e: b.configure(bg=COL_PRIMARY_HOVER) if str(b["state"]) != "disabled" else None)
+        b.bind("<Leave>", lambda e: b.configure(bg=COL_PRIMARY) if str(b["state"]) != "disabled" else None)
+        self._primary_btns = getattr(self, "_primary_btns", []) + [b]
+        self._size_primary(b)
+        return b
+
+    def _size_primary(self, b):
+        b.configure(padx=self._sc(12 if b._big else 8), pady=self._sc(5 if b._big else 3))
 
     def set_scale(self, v):
         """文字の大きさを変える（80%〜200%）。ウィンドウも同じ割合で大きく／小さくする"""
@@ -732,14 +755,14 @@ class App:
 
         bot = ttk.Frame(tab)
         bot.pack(fill="x")
-        self._hint("copy", ttk.Button(bot, style="Big.TButton", command=self.copy_output), "コピー").pack(side="left")
+        self._hint("copy", self._primary(bot, self.copy_output), "コピー").pack(side="left")
         self._hint("recheck", ttk.Button(bot, command=self.recheck), "再チェック").pack(side="left", padx=6)
-        self._hint("send_learn", ttk.Button(bot, command=self.send_manual), "手直しを辞書の候補に送る →").pack(side="right")
+        self._hint("send_learn", self._primary(bot, self.send_manual, big=False), "手直しを辞書の候補に送る →").pack(side="right")
 
         pv = ttk.Frame(tab)
         pv.pack(fill="x", pady=(8, 0))
         # よく使うので、コピーと同じ大きなボタンにする
-        self.btn_play = self._hint("preview", ttk.Button(pv, style="Big.TButton", command=self.preview), "▶ 試聴")
+        self.btn_play = self._hint("preview", self._primary(pv, self.preview), "▶ 試聴")
         self.btn_play.pack(side="left")
         self.btn_stop = self._hint("stop", ttk.Button(pv, style="Big.TButton", command=self.stop_preview), "■ 停止")
         self.btn_stop.pack(side="left", padx=(4, 12))
@@ -771,7 +794,10 @@ class App:
                       foreground="#666").pack(anchor="w")
             for w in (self.btn_play, self.btn_stop, self.voice_box, self.btn_open_player,
                       self.btn_vol_down, self.btn_vol_up, self.btn_mute):
-                w.state(["disabled"])
+                if isinstance(w, tk.Button):
+                    w.configure(state="disabled", bg=COL_PRIMARY_DISABLED, disabledforeground="#f4f6f9", cursor="")
+                else:
+                    w.state(["disabled"])
 
         ttk.Label(tab, text="チェック結果（クリックすると該当箇所を選択）").pack(anchor="w", pady=(10, 2))
         self.issue_list = tk.Listbox(tab, height=4, font=self.f_ui, activestyle="none")
