@@ -2134,7 +2134,39 @@ def convert(raw: str, dic: Dictionary, numbers: dict) -> Result:
         cands = " ／ ".join(f"{e.dst}（{ctx_label(e.before, e.after) or '条件なし'}）" for e in es)
         findings.append(Finding("文脈", "accent_conflict", src, f"複数のアクセント候補：{src} → {cands}",
                                 "候補から選ぶ", data={"start": a, "end": b, "entries": es}))
+    findings += short_entry_findings(s, applied)
     return Result(s, applied, validate(s), findings, pre.units, pre.numbers, pre.english)
+
+
+SHORT_ENTRY_MORA = 3     # これ以下の拍の項目が長い語の中に当たったら知らせる
+
+
+def short_entry_findings(s: str, applied: list[Applied]) -> list["Finding"]:
+    """短い辞書の項目が、句の中の長い語の頭や途中に当たった所（えん → ふち' が「えんじん」に当たる、など）。
+    後ろが助詞などだけ（えんに・えんの）なら知らせない。前後の条件つきの項目は、当たる所を決めてあるので見ない"""
+    out, seen = [], set()
+    for a in applied:
+        e = a.entry
+        if e.before or e.after or mora_count(ctx_plain(e.src)) > SHORT_ENTRY_MORA:
+            continue
+        i = a.start
+        while i > 0 and s[i - 1] not in BOUNDARY:
+            i -= 1
+        j = a.end
+        while j < len(s) and s[j] not in BOUNDARY:
+            j += 1
+        pre, post = ctx_plain(s[i:a.start]), ctx_plain(s[a.end:j])
+        if not pre and _is_tail(post):
+            continue
+        word = pre + ctx_plain(e.src) + ("" if _is_tail(post) else _strip_tail(post))
+        if (e.src, word) in seen:
+            continue
+        seen.add((e.src, word))
+        where = "中" if pre else "頭"
+        out.append(Finding("辞書", "short_entry_inside_word", e.src,
+                           f"短い辞書の項目が、長い語の中に当たりました：{e.src} → {e.dst}（｢{word}｣の{where}）",
+                           "辞書の項目を開く", data={"entry": e}))
+    return out
 
 
 # ─────────────────────────────────────────────
@@ -2298,7 +2330,8 @@ def _learn_line(b: str, a: str, numflags: list[bool] | None = None) -> list[Cand
                 pa += ACCENT
             wb, wa = _strip_particle(pb, pa)
             if ACCENT in wa and wb != wa and _skel_len(wb) >= 2 and (wb, wa) != (bt, at):
-                out.append(Candidate(wb, wa, "語", _skel_len(wb) <= 3))
+                short = _skel_len(wb) <= 3
+                out.append(Candidate(wb, wa, "語", short, use=not short))   # 短い語は長い語の中でも当たるので、既定では登録しない
     return out
 
 

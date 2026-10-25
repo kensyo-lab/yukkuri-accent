@@ -23,7 +23,7 @@ from tkinter import ttk, messagebox, filedialog
 import accent_core as core
 
 APP_NAME = "ゆっくりアクセント辞書"
-VERSION = "1.0.6"
+VERSION = "1.0.7"
 
 if getattr(sys, "frozen", False):
     BASE_DIR = os.path.dirname(sys.executable)
@@ -961,7 +961,10 @@ class App:
     # 指摘の種類 → ダブルクリックしたときの操作
     FINDING_ACTIONS = {"acronym": "_register_english", "n_head": "_register_english",
                        "unit_unknown": "_register_unit", "accent_conflict": "_choose_candidate",
-                       "corrected_before": "_show_history"}
+                       "corrected_before": "_show_history", "short_entry_inside_word": "_open_finding_entry"}
+
+    def _open_finding_entry(self, f):
+        self.open_in_dict(f.data["entry"])
 
     def _show_history(self, f):
         h = f.data.get("history") or {}
