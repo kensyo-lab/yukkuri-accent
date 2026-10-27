@@ -45,9 +45,9 @@ print(f"{ok} 件 OK")
 
 # 打ったそばから直す記号（文字数は変えない・タグの中は触らない）
 from accent_core import mark_fixes
-def fixed(s):
+def fixed(s, hold=None):
     cs = list(s)
-    for i, ch in mark_fixes(s):
+    for i, ch in mark_fixes(s, hold):
         cs[i] = ch
     return "".join(cs)
 ok2 = 0
@@ -60,9 +60,24 @@ for src, want in [
     ("なに?", "なに？"),
     ("<NUMK VAL=1’>’", "<NUMK VAL=1’>'"),  # タグの中はそのまま
     ("すでに/ただしい'かたち", "すでに/ただしい'かたち"),
+    ("_しゅくしゃ", "_シュくしゃ"),       # _ の直後の音は、小さい字まで（_シュ を _シゅ にしない）
+    ("_シゅくしゃ", "_シュくしゃ"),
+    ("あ_てぃ", "あ_ティ"),
+    ("_クしゃ", "_クしゃ"),               # _ の音の後ろの拗音には触らない
 ]:
     got = fixed(src)
     assert got == want, (src, got, want)
     assert len(got) == len(src)
+    ok2 += 1
+# _ を打った直後は、カーソルの後ろの仮名に触らない（「_シゅ|しゃ」に「_ク」を入れる途中で し を シ にしない）
+for src, hold, want in [("_シュ_しゃ", 4, "_シュ_しゃ"), ("_シュ_しゃ", None, "_シュ_シャ"), ("ありま_す", 4, "ありま_す"),
+                        ("ありま_す", 5, "ありま_ス")]:
+    got = fixed(src, hold)
+    assert got == want, (src, hold, got, want)
+    ok2 += 1
+from accent_core import normalize, validate
+for src, want in [("_シュくしゃ", "_シュくしゃ"), ("_しゅくしゃ", "_シュくしゃ"), ("あ_てぃ", "あ_ティ"), ("_クシャ", "_クしゃ")]:
+    got = normalize(src)
+    assert got == want and not validate(got), (src, got, want)   # YMM4 の _シュ を変換しても、エラーにしない
     ok2 += 1
 print(f"記号の自動修正 {ok2} 件 OK")

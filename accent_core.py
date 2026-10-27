@@ -79,8 +79,9 @@ def _normalize_plain(s: str) -> str:
         if c in SPACES:
             continue
         c = WIDTH_MAP.get(c, c)
-        if after_devoice:
-            c = to_kata(c)            # _ の直後はカタカナ
+        if after_devoice or (out and out[-1] != DEVOICE and _devoiced_at(out, len(out) - 1) and
+                             to_hira(c) in SMALL_KANA):
+            c = to_kata(c)            # _ の直後の音（_シュ の ュ まで）はカタカナ
             after_devoice = False
         elif c != DEVOICE:
             c = to_hira(c)            # それ以外のカタカナはひらがなへ
@@ -90,20 +91,31 @@ def _normalize_plain(s: str) -> str:
     return "".join(out)
 
 
-def mark_fixes(s: str) -> list[tuple[int, str]]:
+def _devoiced_at(s, i: int) -> bool:
+    """s[i] が、_ の直後の音の1文字目か"""
+    return i >= 1 and s[i - 1] == DEVOICE
+
+
+def mark_fixes(s: str, hold: int | None = None) -> list[tuple[int, str]]:
     """入力しながらその場で直す所を返す: [(位置, 直した文字)]。
-    全角・似た形の記号（’ ＿ ／ ？ など）→ AquesTalk が受け付ける形、_ の直後のひらがな → カタカナ。
-    normalize と違って文字数は変えない（空白の削除やカタカナ→ひらがなはしない）。<タグ> の中には触らない。"""
+    全角・似た形の記号（’ ＿ ／ ？ など）→ AquesTalk が受け付ける形、_ の直後の音（_しゅ の ゅ まで）→ カタカナ。
+    normalize と違って文字数は変えない（空白の削除やカタカナ→ひらがなはしない）。<タグ> の中には触らない。
+    hold は入力中のカーソルの位置。_ を打った直後で、カーソルの後ろの仮名は、続けて打つ途中かもしれないので触らない
+    （「_シゅ|しゃ」に「_ク」を入れたいのに、_ を打った所で し が シ に変わらないように）"""
     tags = [(m.start(), m.end()) for m in TAG_RE.finditer(s)]
-    out, prev, t = [], "", 0
+    out, prev, t, dv = [], "", 0, False      # dv: _ の直後の音の中
     for i, c in enumerate(s):
         while t < len(tags) and tags[t][1] <= i:
             t += 1
         if t < len(tags) and tags[t][0] <= i:
-            prev = c
+            prev, dv = c, False
             continue
         new = WIDTH_MAP.get(c, c)
-        if prev == DEVOICE and is_hira(new):
+        if prev == DEVOICE and i != hold:
+            dv = True
+        elif not (dv and to_hira(new) in SMALL_KANA):
+            dv = False
+        if dv and is_hira(new):
             new = to_kata(new)
         if new != c:
             out.append((i, new))

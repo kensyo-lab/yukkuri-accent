@@ -642,7 +642,8 @@ class App:
     def _fix_marks(self, t):
         """全角の ’ ＿ ／ などを、打ったそばから AquesTalk の形（半角）に直す。YMM4 は全角を受け付けないため"""
         s = t.get("1.0", "end-1c")
-        fixes = core.mark_fixes(s)
+        cur = len(t.get("1.0", "insert"))
+        fixes = core.mark_fixes(s, hold=cur if t.focus_get() is t else None)
         if not fixes:
             return
         shown = "、".join(dict.fromkeys(f"{s[i]}→{ch}" for i, ch in fixes))
@@ -651,6 +652,7 @@ class App:
             tags = [g for g in t.tag_names(idx) if g != "sel"]
             t.delete(idx)
             t.insert(idx, ch, tags)
+        t.mark_set("insert", f"1.0+{cur}c")      # 置き換えでカーソルが後ろへずれないように（文字数は変わらない）
         self._refresh_status([("記号を YMM4（AquesTalk）で使える形に直しました：", None), (shown, "warn")])
 
     def _paint_marks(self, t):
