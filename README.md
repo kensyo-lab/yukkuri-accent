@@ -420,7 +420,7 @@ YMM4 は英字をカナにしてから渡すので、このツールには英字
 | `backup/` | 辞書の自動バックアップ（起動時などに作られます。`backup/keep` は消えない節目のバックアップ） |
 | `accent_core.py` | 変換・学習・検査のロジック（GUIなしでも使えます） |
 | `accent_app.py` | 画面（tkinter） |
-| `dictionaries/kensyo.json` | 作者（けんしょう）の辞書。参考に取り込めます |
+| `dictionaries/kensyo.json` | 作者（けんしょう）の辞書（817項目。宇宙・天文の動画で育てたので、専門用語も含みます）。参考に取り込めます |
 | `yukkuri-accent.pyw` | Pythonでダブルクリック起動するためのファイル |
 | `assets/icon.png` | アプリのアイコン |
 | `assets/help/` | 「?」の印の画像（`tools/make_help_icon.py` で作ります） |
